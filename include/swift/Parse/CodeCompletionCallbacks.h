@@ -147,6 +147,9 @@ public:
   /// \brief Complete the beginning of a statement or expression.
   virtual void completeStmtOrExpr() = 0;
 
+  /// \brief Complete the identifier in an expression
+  virtual void completeIdentifier() = 0;
+
   /// \brief Complete the beginning of expr-postfix -- no tokens provided
   /// by user.
   virtual void completePostfixExprBeginning(CodeCompletionExpr *E) = 0;

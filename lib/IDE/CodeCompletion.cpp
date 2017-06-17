@@ -1284,6 +1284,7 @@ class CodeCompletionCallbacksImpl : public CodeCompletionCallbacks {
   CallExpr *FuncCallExpr;
   UnresolvedMemberExpr *UnresolvedExpr;
   bool UnresolvedExprInReturn;
+  std::string IdentifierToComplete;
   std::vector<std::string> TokensBeforeUnresolvedExpr;
   CompletionKind Kind = CompletionKind::None;
   Expr *ParsedExpr = nullptr;
@@ -1437,6 +1438,7 @@ public:
   }
 
   void completeExpr() override;
+  void completeIdentifier() override;
   void completeDotExpr(Expr *E, SourceLoc DotLoc) override;
   void completeStmtOrExpr() override;
   void completePostfixExprBeginning(CodeCompletionExpr *E) override;
@@ -1482,9 +1484,12 @@ void CodeCompletionCallbacksImpl::completeExpr() {
   Parser::ParserPositionRAII RestorePosition(P);
   P.restoreParserPosition(ExprBeginPosition);
 
-  // FIXME: implement fallback code completion.
-
-  deliverCompletionResults();
+  if(P.Tok.is(swift::tok::identifier))  {
+      completeIdentifier();
+  } else {
+      // FIXME: implement fallback code completion.
+      deliverCompletionResults();
+  }
 }
 
 namespace {
@@ -4421,6 +4426,15 @@ void CodeCompletionCallbacksImpl::completeDotExpr(Expr *E, SourceLoc DotLoc) {
   CurDeclContext = P.CurDeclContext;
 }
 
+void CodeCompletionCallbacksImpl::completeIdentifier() {
+  assert(P.Tok.is(tok::identifier));
+ // we are trying to complete an identifier
+  Kind = CompletionKind::Identifier;
+  IdentifierToComplete = P.Tok.getText();
+  CurDeclContext = P.CurDeclContext;
+  CStyleForLoopIterationVariable =
+    CodeCompletionCallbacks::CStyleForLoopIterationVariable;
+}
 void CodeCompletionCallbacksImpl::completeStmtOrExpr() {
   assert(P.Tok.is(tok::code_complete));
   Kind = CompletionKind::StmtOrExpr;
@@ -4806,6 +4820,7 @@ void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
   case CompletionKind::SwiftKeyPath:
     break;
 
+  case CompletionKind::Identifier:
   case CompletionKind::StmtOrExpr:
     addDeclKeywords(Sink);
     addStmtKeywords(Sink, MaybeFuncBody);
@@ -5160,6 +5175,9 @@ void CodeCompletionCallbacksImpl::doneParsing() {
     break;
   }
 
+  case CompletionKind::Identifier:
+    DoPostfixExprBeginning();
+    break;
   case CompletionKind::StmtOrExpr:
     DoPostfixExprBeginning();
     break;

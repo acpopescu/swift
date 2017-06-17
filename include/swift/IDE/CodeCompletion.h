@@ -504,6 +504,7 @@ enum class CompletionKind {
   AfterPound,
   GenericParams,
   SwiftKeyPath,
+  Identifier,
 };
 
 /// \brief A single code completion result.
