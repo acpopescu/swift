@@ -1227,9 +1227,7 @@ namespace {
     Expr *coerceToType(Expr *expr, Type toType,
                        ConstraintLocatorBuilder locator,
                        Optional<Pattern*> typeFromPattern = None);
-
-    using LevelTy = llvm::PointerEmbeddedInt<unsigned, 2>;
-
+    
     /// \brief Coerce the given expression (which is the argument to a call) to
     /// the given parameter type.
     ///
@@ -1237,9 +1235,7 @@ namespace {
     ///
     /// \param arg The argument expression.
     /// \param paramType The parameter type.
-    /// \param applyOrLevel For function applications, the ApplyExpr that forms
-    /// the call. Otherwise, a specific level describing which parameter level
-    /// we're applying.
+    /// \param apply The ApplyExpr that forms the call.
     /// \param argLabels The argument labels provided for the call.
     /// \param hasTrailingClosure Whether the last argument is a trailing
     /// closure.
@@ -1248,7 +1244,7 @@ namespace {
     /// \returns the coerced expression, which will have type \c ToType.
     Expr *
     coerceCallArguments(Expr *arg, Type paramType,
-                        llvm::PointerUnion<ApplyExpr *, LevelTy> applyOrLevel,
+                        ApplyExpr *apply,
                         ArrayRef<Identifier> argLabels,
                         bool hasTrailingClosure,
                         ConstraintLocatorBuilder locator);
@@ -1351,7 +1347,7 @@ namespace {
               base = cs.coerceToRValue(base);
             } else if (keyPathBGT->getDecl() ==
                          cs.getASTContext().getWritableKeyPathDecl()) {
-              resultIsLValue = cs.getType(base)->isLValueType();
+              resultIsLValue = cs.getType(base)->hasLValueType();
             } else if (keyPathBGT->getDecl() ==
                        cs.getASTContext().getReferenceWritableKeyPathDecl()) {
               resultIsLValue = true;
@@ -1406,10 +1402,9 @@ namespace {
       }
 
       // Coerce the index argument.
-      index = coerceCallArguments(
-          index, indexTy, LevelTy(1), argLabels,
-          hasTrailingClosure,
-          locator.withPathElement(ConstraintLocator::SubscriptIndex));
+      index = coerceToType(index, indexTy,
+                           locator.withPathElement(
+                             ConstraintLocator::SubscriptIndex));
       if (!index)
         return nullptr;
 
@@ -2594,7 +2589,7 @@ namespace {
         // tuple coercion to properly load & set access kind on all underlying elements
         // before taking a single element.
         baseTy = cs.getType(base);
-        if (!toType->isLValueType() && baseTy->isLValueType())
+        if (!toType->hasLValueType() && baseTy->hasLValueType())
           base = coerceToType(base, baseTy->getRValueType(), cs.getConstraintLocator(base));
 
         return cs.cacheType(new (cs.getASTContext())
@@ -3785,7 +3780,7 @@ namespace {
           return E;
         }
 
-        if (cs.getType(subExpr)->isLValueType()) {
+        if (cs.getType(subExpr)->hasLValueType()) {
           // Treat this like a read of the property.
           cs.propagateLValueAccessKind(subExpr, AccessKind::Read);
         }
@@ -5006,7 +5001,7 @@ Expr *ExprRewriter::coerceExistential(Expr *expr, Type toType,
 
   // Load tuples with lvalue elements.
   if (auto tupleType = fromType->getAs<TupleType>()) {
-    if (tupleType->isLValueType()) {
+    if (tupleType->hasLValueType()) {
       auto toTuple = tupleType->getRValueType()->castTo<TupleType>();
       SmallVector<int, 4> sources;
       SmallVector<unsigned, 4> variadicArgs;
@@ -5140,23 +5135,12 @@ static bool isReferenceToMetatypeMember(ConstraintSystem &cs, Expr *expr) {
   return false;
 }
 
-static unsigned computeCallLevel(
-    ConstraintSystem &cs, ConcreteDeclRef callee,
-    llvm::PointerUnion<ApplyExpr *, ExprRewriter::LevelTy> applyOrLevel) {
-  using LevelTy = ExprRewriter::LevelTy;
-
-  if (applyOrLevel.is<LevelTy>()) {
-    // Level specified by caller.
-    return applyOrLevel.get<LevelTy>();
-  }
-
+static unsigned computeCallLevel(ConstraintSystem &cs, ConcreteDeclRef callee,
+                                 ApplyExpr *apply) {
   // If we do not have a callee, return a level of 0.
   if (!callee) {
     return 0;
   }
-
-  // Determine the level based on the application itself.
-  auto *apply = applyOrLevel.get<ApplyExpr *>();
 
   // Only calls to members of types can have level > 0.
   auto calleeDecl = callee.getDecl();
@@ -5185,7 +5169,7 @@ static unsigned computeCallLevel(
 
 Expr *ExprRewriter::coerceCallArguments(
     Expr *arg, Type paramType,
-    llvm::PointerUnion<ApplyExpr *, LevelTy> applyOrLevel,
+    ApplyExpr *apply,
     ArrayRef<Identifier> argLabels,
     bool hasTrailingClosure,
     ConstraintLocatorBuilder locator) {
@@ -5230,7 +5214,7 @@ Expr *ExprRewriter::coerceCallArguments(
     findCalleeDeclRef(cs, solution, cs.getConstraintLocator(locator));
 
   // Determine the level,
-  unsigned level = computeCallLevel(cs, callee, applyOrLevel);
+  unsigned level = computeCallLevel(cs, callee, apply);
 
   // Determine the parameter bindings.
   auto params = decomposeParamType(paramType, callee.getDecl(), level);
@@ -7285,32 +7269,15 @@ namespace {
 } // end anonymous namespace
 
 Expr *ConstraintSystem::coerceToRValue(Expr *expr) {
-  // Can't load from an inout value.
-  if (auto *iot = getType(expr)->getAs<InOutType>()) {
-    // Emit a fixit if we can find the & expression that turned this into an
-    // inout.
-    auto &tc = getTypeChecker();
-    if (auto addrOf =
-        dyn_cast<InOutExpr>(expr->getSemanticsProvidingExpr())) {
-      tc.diagnose(expr->getLoc(), diag::load_of_explicit_lvalue,
-                  iot->getObjectType())
-        .fixItRemove(SourceRange(addrOf->getLoc()));
-      return coerceToRValue(addrOf->getSubExpr());
-    } else {
-      tc.diagnose(expr->getLoc(), diag::load_of_explicit_lvalue,
-                  iot->getObjectType());
-      return expr;
-    }
-  }
-
-  // If we already have an rvalue, we're done, otherwise emit a load.
-  if (auto lvalueTy = getType(expr)->getAs<LValueType>()) {
-    propagateLValueAccessKind(expr, AccessKind::Read);
-    return cacheType(new (getASTContext())
-                         LoadExpr(expr, lvalueTy->getObjectType()));
-  }
-
-  return expr;
+  auto &tc = getTypeChecker();
+  return tc.coerceToRValue(expr,
+                           [&](Expr *expr) {
+                             return getType(expr);
+                           },
+                           [&](Expr *expr, Type type) {
+                             expr->setType(type);
+                             cacheType(expr);
+                           });
 }
 
 /// Emit the fixes computed as part of the solution, returning true if we were
@@ -7530,6 +7497,10 @@ Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
     return nullptr;
   }
 
+  // Mark any normal conformances used in this solution as "used".
+  for (auto &e : solution.Conformances)
+    TC.markConformanceUsed(e.second, DC);
+
   ExprRewriter rewriter(*this, solution, suppressDiagnostics, skipClosures);
   ExprWalker walker(rewriter);
 
@@ -7545,7 +7516,7 @@ Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
                                    getConstraintLocator(expr));
     if (!result)
       return nullptr;
-  } else if (getType(result)->isLValueType() && !discardedExpr) {
+  } else if (getType(result)->hasLValueType() && !discardedExpr) {
     // We referenced an lvalue. Load it.
     result = rewriter.coerceToType(result, getType(result)->getRValueType(),
                                    getConstraintLocator(expr));

@@ -733,8 +733,6 @@ NOTE(previous_precedence_group_decl,none,
 
 ERROR(tuple_conversion_not_expressible,none,
       "cannot express tuple conversion %0 to %1", (Type, Type))
-ERROR(load_of_explicit_lvalue,none,
-      "%0 variable is not being passed by reference", (Type))
 
 //------------------------------------------------------------------------------
 // Expression Type Checking Errors
@@ -1196,7 +1194,8 @@ ERROR(pattern_type_access,none,
       "%select{%select{variable|constant}0|property}1 "
       "%select{must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}3|private or fileprivate}4"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}3}2 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}3}2 "
       "because its type uses "
       "%select{a private|a fileprivate|an internal|%error|%error}5 type",
       (bool, bool, bool, Accessibility, bool, Accessibility))
@@ -1211,7 +1210,8 @@ ERROR(pattern_type_access_inferred,none,
       "%select{%select{variable|constant}0|property}1 "
       "%select{must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}3|private or fileprivate}4"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}3}2 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}3}2 "
       "because its type %6 uses "
       "%select{a private|a fileprivate|an internal|%error|%error}5 type",
       (bool, bool, bool, Accessibility, bool, Accessibility, Type))
@@ -1263,14 +1263,16 @@ ERROR(unsupported_nested_protocol,none,
 ERROR(type_alias_underlying_type_access,none,
       "type alias %select{must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}2|private or fileprivate}3"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}1}0 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}1}0 "
       "because its underlying type uses "
       "%select{a private|a fileprivate|an internal|%error|%error}2 type",
       (bool, Accessibility, Accessibility, bool))
 WARNING(type_alias_underlying_type_access_warn,none,
         "type alias %select{should be declared "
         "%select{private|fileprivate|internal|%error|%error}2"
-        "|should not be declared %select{%error|fileprivate|internal|public|open}1}0 "
+        "|should not be declared "
+        "%select{in this context|fileprivate|internal|public|open}1}0 "
         "because its underlying type uses "
         "%select{a private|a fileprivate|an internal|%error|%error}2 type",
         (bool, Accessibility, Accessibility, bool))
@@ -1279,7 +1281,8 @@ WARNING(type_alias_underlying_type_access_warn,none,
 ERROR(subscript_type_access,none,
       "subscript %select{must be declared "
       "%select{private|fileprivate|internal|%error|%error}1"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}1}0 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}1}0 "
       "because its %select{index|element type}3 uses "
       "%select{a private|a fileprivate|an internal|%error|%error}2 type",
       (bool, Accessibility, Accessibility, bool))
@@ -1296,7 +1299,8 @@ ERROR(function_type_access,none,
       "%select{function|method|initializer}4 "
       "%select{must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}1|private or fileprivate}2"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}1}0 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}1}0 "
       "because its %select{parameter|result}5 uses "
       "%select{a private|a fileprivate|an internal|%error|%error}3 type",
       (bool, Accessibility, bool, Accessibility, unsigned, bool))
@@ -1416,11 +1420,6 @@ ERROR(witness_self_same_type,none,
       " (in protocol %5) due to same-type requirement involving 'Self'",
       (DescriptiveDeclKind, DeclName, Type, DescriptiveDeclKind,
        DeclName, Type))
-WARNING(witness_self_same_type_warn,none,
-      "%0 %1 in non-final class %2 cannot be used to satisfy requirement %3 %4"
-      " (in protocol %5) due to same-type requirement involving 'Self'",
-      (DescriptiveDeclKind, DeclName, Type, DescriptiveDeclKind,
-       DeclName, Type))
 NOTE(witness_self_weaken_same_type,none,
       "consider weakening the same-type requirement %0 == %1 to a superclass "
       "requirement", (Type, Type))
@@ -1454,8 +1453,9 @@ ERROR(protocol_refine_access,none,
       "%select{protocol must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}2"
       "|private or fileprivate}3 because it refines"
-      "|%select{%error|fileprivate|internal|public|%error}1 protocol cannot "
-      "refine}0 %select{a private|a fileprivate|an internal|%error|%error}2 protocol",
+      "|%select{in this context|fileprivate|internal|public|%error}1 "
+      "protocol cannot refine}0 "
+      "%select{a private|a fileprivate|an internal|%error|%error}2 protocol",
       (bool, Accessibility, Accessibility, bool))
 WARNING(protocol_refine_access_warn,none,
         "%select{protocol should be declared "
@@ -1494,7 +1494,8 @@ NOTE(default_associated_type_req_fail,none,
      (Type, DeclName, Type, Type, bool))
 ERROR(associated_type_access,none,
       "associated type in "
-      "%select{%error|a fileprivate|an internal|a public|%error}0 protocol uses "
+      "%select{a private|a fileprivate|an internal|a public|%error}0 protocol "
+      "uses "
       "%select{a private|a fileprivate|an internal|%error|%error}1 type in its "
       "%select{default definition|requirement}2 ",
       (Accessibility, Accessibility, unsigned))
@@ -1724,7 +1725,8 @@ WARNING(typealias_override_associated_type,none,
 ERROR(generic_param_access,none,
       "%0 %select{must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}3|private or fileprivate}4"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}2}1 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}2}1 "
       "because its generic %select{parameter|requirement}5 uses "
       "%select{a private|a fileprivate|an internal|%error|%error}3 type",
       (DescriptiveDeclKind, bool, Accessibility, Accessibility, bool, bool))
@@ -1768,18 +1770,18 @@ NOTE(multiple_override_prev,none,
      "%0 previously overridden here", (DeclName))
 
 ERROR(override_unavailable,none,
-      "cannot override %0 which has been marked unavailable", (Identifier))
+      "cannot override %0 which has been marked unavailable", (DeclBaseName))
 ERROR(override_unavailable_msg, none,
       "cannot override %0 which has been marked unavailable: %1",
-      (Identifier, StringRef))
+      (DeclBaseName, StringRef))
 
 ERROR(override_less_available,none,
       "overriding %0 must be as available as declaration it overrides",
-      (Identifier))
+      (DeclBaseName))
 
 ERROR(override_accessor_less_available,none,
       "overriding %0 for %1 must be as available as declaration it overrides",
-      (DescriptiveDeclKind, Identifier))
+      (DescriptiveDeclKind, DeclBaseName))
 
 ERROR(override_let_property,none,
       "cannot override immutable 'let' property %0 with the getter of a 'var'",
@@ -1946,7 +1948,7 @@ WARNING(class_inherits_anyobject,none,
 
 // Enums
 ERROR(enum_case_access,none,
-      "enum case in %select{%error|a fileprivate|an internal|a public|%error}0 enum "
+      "enum case in %select{a private|a fileprivate|an internal|a public|%error}0 enum "
       "uses %select{a private|a fileprivate|an internal|%error|%error}1 type",
       (Accessibility, Accessibility))
 WARNING(enum_case_access_warn,none,
@@ -1977,7 +1979,8 @@ NOTE(enum_declares_rawrep_with_raw_type,none,
 ERROR(enum_raw_type_access,none,
       "enum %select{must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}2|private or fileprivate}3"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}1}0 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}1}0 "
       "because its raw type uses "
       "%select{a private|a fileprivate|an internal|%error|%error}2 type",
       (bool, Accessibility, Accessibility, bool))
@@ -2083,7 +2086,7 @@ ERROR(property_behavior_protocol_no_initStorage,none,
       (Type, Type))
 ERROR(property_behavior_unknown_requirement,none,
       "property behavior protocol %0 has non-behavior requirement %1",
-      (Identifier, Identifier))
+      (Identifier, DeclBaseName))
 NOTE(property_behavior_unknown_requirement_here,none,
      "declared here", ())
 NOTE(self_conformance_required_by_property_behavior,none,
@@ -2603,7 +2606,7 @@ NOTE(add_self_to_type,none,
 
 WARNING(warn_unqualified_access,none,
         "use of %0 treated as a reference to %1 in %2 %3",
-        (Identifier, DescriptiveDeclKind, DescriptiveDeclKind, DeclName))
+        (DeclBaseName, DescriptiveDeclKind, DescriptiveDeclKind, DeclName))
 NOTE(fix_unqualified_access_member,none,
      "use 'self.' to silence this warning", ())
 NOTE(fix_unqualified_access_top_level,none,
@@ -2698,9 +2701,6 @@ NOTE(silence_optional_in_interpolation_segment_call,none,
 ERROR(invalid_noescape_use,none,
       "non-escaping %select{value|parameter}1 %0 may only be called",
       (Identifier, bool))
-NOTE(noescape_autoclosure,none,
-    "parameter %0 is implicitly non-escaping because it was declared @autoclosure",
-     (Identifier))
 NOTE(noescape_parameter,none,
     "parameter %0 is implicitly non-escaping",
      (Identifier))
@@ -3028,7 +3028,8 @@ ERROR(bool_intrinsics_not_found,none,
 ERROR(class_super_access,none,
       "class %select{must be declared %select{"
       "%select{private|fileprivate|internal|%error|%error}2|private or fileprivate}3"
-      "|cannot be declared %select{%error|fileprivate|internal|public|open}1}0 "
+      "|cannot be declared "
+      "%select{in this context|fileprivate|internal|public|open}1}0 "
       "because its superclass is "
       "%select{private|fileprivate|internal|%error|%error}2",
       (bool, Accessibility, Accessibility, bool))
@@ -3571,12 +3572,12 @@ ERROR(fixed_layout_attr_on_internal_type,
       none, "'@_fixed_layout' attribute can only be applied to '@_versioned' "
       "or public declarations, but %0 is "
       "%select{private|fileprivate|internal|%error|%error}1",
-      (Identifier, Accessibility))
+      (DeclBaseName, Accessibility))
 
 ERROR(versioned_attr_with_explicit_accessibility,
       none, "'@_versioned' attribute can only be applied to internal "
       "declarations, but %0 is %select{private|fileprivate|%error|public|open}1",
-      (Identifier, Accessibility))
+      (DeclBaseName, Accessibility))
 
 ERROR(versioned_attr_in_protocol,none,
       "'@_versioned' attribute cannot be used in protocols", ())
@@ -3599,6 +3600,9 @@ ERROR(resilience_decl_unavailable,
 #undef FRAGILE_FUNC_KIND
 
 NOTE(resilience_decl_declared_here,
+     none, "%0 %1 is not public", (DescriptiveDeclKind, DeclName))
+
+NOTE(resilience_decl_declared_here_versioned,
      none, "%0 %1 is not '@_versioned' or public", (DescriptiveDeclKind, DeclName))
 
 ERROR(designated_init_in_extension_resilient,none,
@@ -3621,7 +3625,7 @@ ERROR(inlineable_stored_property,
 ERROR(inlineable_decl_not_public,
       none, "'@_inlineable' attribute can only be applied to public declarations, "
       "but %0 is %select{private|fileprivate|internal|%error|%error}1",
-      (Identifier, Accessibility))
+      (DeclBaseName, Accessibility))
 
 //------------------------------------------------------------------------------
 // @_specialize diagnostics
@@ -3708,6 +3712,9 @@ WARNING(debug_long_function_body, none,
         (DescriptiveDeclKind, DeclName, unsigned, unsigned))
 WARNING(debug_long_closure_body, none,
         "closure took %0ms to type-check (limit: %1ms)",
+        (unsigned, unsigned))
+WARNING(debug_long_expression, none,
+        "expression took %0ms to type-check (limit: %1ms)",
         (unsigned, unsigned))
 
 //------------------------------------------------------------------------------

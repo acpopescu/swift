@@ -191,7 +191,8 @@ namespace swift {
   void performTypeChecking(SourceFile &SF, TopLevelContext &TLC,
                            OptionSet<TypeCheckingFlags> Options,
                            unsigned StartElem = 0,
-                           unsigned WarnLongFunctionBodies = 0);
+                           unsigned WarnLongFunctionBodies = 0,
+                           unsigned WarnLongExpressionTypeChecking = 0);
 
   /// Once type checking is complete, this walks protocol requirements
   /// to resolve default witnesses.
@@ -241,25 +242,19 @@ namespace swift {
   ///
   /// The module must contain source files.
   ///
-  /// If \p makeModuleFragile is true, all functions and global variables of
-  /// the module are marked as fragile. This is used for compiling the stdlib.
   /// if \p wholeModuleCompilation is true, the optimizer assumes that the SIL
   /// of all files in the module is present in the SILModule.
   std::unique_ptr<SILModule>
   performSILGeneration(ModuleDecl *M, SILOptions &options,
-                       bool makeModuleFragile = false,
                        bool wholeModuleCompilation = false);
 
   /// Turn a source file into SIL IR.
   ///
   /// If \p StartElem is provided, the module is assumed to be only part of the
   /// SourceFile, and any optimizations should take that into account.
-  /// If \p makeModuleFragile is true, all functions and global variables of
-  /// the module are marked as fragile. This is used for compiling the stdlib.
   std::unique_ptr<SILModule>
   performSILGeneration(FileUnit &SF, SILOptions &options,
-                       Optional<unsigned> StartElem = None,
-                       bool makeModuleFragile = false);
+                       Optional<unsigned> StartElem = None);
 
   using ModuleOrSourceFile = PointerUnion<ModuleDecl *, SourceFile *>;
 
@@ -267,8 +262,9 @@ namespace swift {
   void serialize(ModuleOrSourceFile DC, const SerializationOptions &options,
                  const SILModule *M = nullptr);
 
-  /// Get the CPU and subtarget feature options to use when emitting code.
-  std::tuple<llvm::TargetOptions, std::string, std::vector<std::string>>
+  /// Get the CPU, subtarget feature options, and triple to use when emitting code.
+  std::tuple<llvm::TargetOptions, std::string, std::vector<std::string>,
+             std::string>
   getIRTargetOptions(IRGenOptions &Opts, ASTContext &Ctx);
 
   /// Turn the given Swift module into either LLVM IR or native code

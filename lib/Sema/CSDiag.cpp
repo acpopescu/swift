@@ -1438,7 +1438,7 @@ CalleeCandidateInfo::evaluateCloseness(UncurriedCandidate candidate,
   // Check to see if the first argument expects an inout argument, but is not
   // an lvalue.
   Type firstArg = actualArgs[0].Ty;
-  if (candArgs[0].Ty->is<InOutType>() && !(firstArg->isLValueType() || firstArg->is<InOutType>()))
+  if (candArgs[0].Ty->is<InOutType>() && !(firstArg->hasLValueType() || firstArg->is<InOutType>()))
     return { CC_NonLValueInOut, {}};
   
   // If we have exactly one argument mismatching, classify it specially, so that
@@ -2375,14 +2375,14 @@ diagnoseTypeMemberOnInstanceLookup(Type baseObjTy,
     // Give a customized message if we're accessing a member type
     // of a protocol -- otherwise a diagnostic talking about
     // static members doesn't make a whole lot of sense
-    if (isa<TypeAliasDecl>(member)) {
+    if (auto TAD = dyn_cast<TypeAliasDecl>(member)) {
       Diag.emplace(diagnose(loc,
                             diag::typealias_outside_of_protocol,
-                            memberName.getBaseName()));
-    } else if (isa<AssociatedTypeDecl>(member)) {
+                            TAD->getName()));
+    } else if (auto ATD = dyn_cast<AssociatedTypeDecl>(member)) {
       Diag.emplace(diagnose(loc,
                             diag::assoc_type_outside_of_protocol,
-                            memberName.getBaseName()));
+                            ATD->getName()));
     } else {
       Diag.emplace(diagnose(loc,
                             diag::could_not_use_type_member_on_protocol_metatype,
@@ -3852,8 +3852,7 @@ static bool tryDiagnoseNonEscapingParameterToEscaping(Expr *expr, Type srcType,
 
   // Give a note and fixit
   InFlightDiagnostic note = CS->TC.diagnose(
-      paramDecl->getLoc(), srcFT->isAutoClosure() ? diag::noescape_autoclosure
-                                                  : diag::noescape_parameter,
+      paramDecl->getLoc(), diag::noescape_parameter,
       paramDecl->getName());
 
   if (!srcFT->isAutoClosure()) {
@@ -4115,7 +4114,7 @@ bool FailureDiagnosis::diagnoseContextualConversionError() {
                contextDecl == CS->TC.Context.getUnsafeRawPointerDecl() ||
                contextDecl == CS->TC.Context.getUnsafeMutableRawPointerDecl()) {
       for (Type arg : genericType->getGenericArgs()) {
-        if (arg->isEqual(exprType) && CS->getType(expr)->isLValueType()) {
+        if (arg->isEqual(exprType) && CS->getType(expr)->hasLValueType()) {
           diagnose(expr->getLoc(), diagID, exprType, contextualType).
             fixItInsert(expr->getStartLoc(), "&");
           return true;
@@ -4951,7 +4950,7 @@ static bool diagnoseTupleParameterMismatch(CalleeCandidateInfo &CCI,
           // Constructors/descructors and subscripts don't really have names.
           if (!(isa<ConstructorDecl>(decl) || isa<DestructorDecl>(decl) ||
                 isa<SubscriptDecl>(decl))) {
-            name = decl->getName();
+            name = decl->getBaseName().getIdentifier();
           }
 
           TC.diagnose(argExpr->getLoc(), diag::single_tuple_parameter_mismatch,
@@ -6413,7 +6412,7 @@ bool FailureDiagnosis::visitAssignExpr(AssignExpr *assignExpr) {
 
   // If the result type is a non-lvalue, then we are failing because it is
   // immutable and that's not a great thing to assign to.
-  if (!destType->isLValueType()) {
+  if (!destType->hasLValueType()) {
     CS->diagnoseAssignmentFailure(destExpr, destType, assignExpr->getLoc());
     return true;
   }
@@ -6506,7 +6505,7 @@ bool FailureDiagnosis::visitInOutExpr(InOutExpr *IOE) {
   auto subExprType = CS->getType(subExpr);
 
   // The common cause is that the operand is not an lvalue.
-  if (!subExprType->isLValueType()) {
+  if (!subExprType->hasLValueType()) {
     diagnoseSubElementFailure(subExpr, IOE->getLoc(), *CS,
                               diag::cannot_pass_rvalue_inout_subelement,
                               diag::cannot_pass_rvalue_inout);
@@ -7142,7 +7141,7 @@ static bool diagnoseKeyPathComponents(ConstraintSystem *CS, KeyPathExpr *KPE,
     switch (auto kind = component.getKind()) {
     case KeyPathExpr::Component::Kind::UnresolvedProperty: {
       auto componentFullName = component.getUnresolvedDeclName();
-      componentName = componentFullName.getBaseName();
+      componentName = componentFullName.getBaseIdentifier();
       break;
     }
 
@@ -7876,7 +7875,7 @@ bool FailureDiagnosis::diagnoseMemberFailures(
 
       if (auto *DRE = dyn_cast<DeclRefExpr>(baseExpr)) {
         diagnose(baseExpr->getLoc(), diag::did_not_call_function,
-                 DRE->getDecl()->getName())
+                 DRE->getDecl()->getBaseName().getIdentifier())
             .fixItInsertAfter(insertLoc, "()");
         return true;
       }
@@ -7884,7 +7883,7 @@ bool FailureDiagnosis::diagnoseMemberFailures(
       if (auto *DSCE = dyn_cast<DotSyntaxCallExpr>(baseExpr))
         if (auto *DRE = dyn_cast<DeclRefExpr>(DSCE->getFn())) {
           diagnose(baseExpr->getLoc(), diag::did_not_call_method,
-                   DRE->getDecl()->getName())
+                   DRE->getDecl()->getBaseName().getIdentifier())
               .fixItInsertAfter(insertLoc, "()");
           return true;
         }
@@ -8728,8 +8727,8 @@ void FailureDiagnosis::diagnoseUnboundArchetype(ArchetypeType *archetype,
     return;
   
   auto decl = resolved.getDecl();
-  if (isa<FuncDecl>(decl)) {
-    auto name = decl->getBaseName();
+  if (auto FD = dyn_cast<FuncDecl>(decl)) {
+    auto name = FD->getName();
     auto diagID = name.isOperator() ? diag::note_call_to_operator
                                     : diag::note_call_to_func;
     tc.diagnose(decl, diagID, name);
@@ -8742,8 +8741,8 @@ void FailureDiagnosis::diagnoseUnboundArchetype(ArchetypeType *archetype,
     return;
   }
   
-  if (isa<ParamDecl>(decl)) {
-    tc.diagnose(decl, diag::note_init_parameter, decl->getBaseName());
+  if (auto PD = dyn_cast<ParamDecl>(decl)) {
+    tc.diagnose(decl, diag::note_init_parameter, PD->getName());
     return;
   }
   

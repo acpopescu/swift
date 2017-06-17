@@ -142,6 +142,10 @@ static void validateArgs(DiagnosticEngine &diags, const ArgList &Args) {
       if (triple.isOSVersionLT(7))
         diags.diagnose(SourceLoc(), diag::error_os_minimum_deployment,
                        "iOS 7");
+      if (triple.isArch32Bit() && !triple.isOSVersionLT(11)) {
+        diags.diagnose(SourceLoc(), diag::error_ios_maximum_deployment_32,
+                       triple.getOSMajorVersion());
+      }
     } else if (triple.isWatchOS()) {
       if (triple.isOSVersionLT(2, 0)) {
           diags.diagnose(SourceLoc(), diag::error_os_minimum_deployment,
@@ -157,7 +161,7 @@ static void validateArgs(DiagnosticEngine &diags, const ArgList &Args) {
     diags.diagnose(SourceLoc(), diag::error_conflicting_options,
                    "-warnings-as-errors", "-suppress-warnings");
   }
-  
+
   // Check for missing debug option when verifying debug info.
   if (Args.hasArg(options::OPT_verify_debug_info)) {
     bool hasDebugOption = true;
@@ -167,6 +171,18 @@ static void validateArgs(DiagnosticEngine &diags, const ArgList &Args) {
     if (!hasDebugOption)
       diags.diagnose(SourceLoc(),
                      diag::verify_debug_info_requires_debug_option);
+  }
+
+  for (const Arg *A : make_range(Args.filtered_begin(options::OPT_D),
+                                 Args.filtered_end())) {
+    StringRef name = A->getValue();
+    if (name.find('=') != StringRef::npos)
+      diags.diagnose(SourceLoc(),
+                     diag::cannot_assign_value_to_conditional_compilation_flag,
+                     name);
+    else if (!Lexer::isIdentifier(name))
+      diags.diagnose(SourceLoc(), diag::invalid_conditional_compilation_flag,
+                     name);
   }
 }
 
@@ -1022,14 +1038,14 @@ static bool isSDKTooOld(StringRef sdkPath, clang::VersionTuple minVersion,
 /// the given target.
 static bool isSDKTooOld(StringRef sdkPath, const llvm::Triple &target) {
   if (target.isMacOSX()) {
-    return isSDKTooOld(sdkPath, clang::VersionTuple(10, 12), "OSX");
+    return isSDKTooOld(sdkPath, clang::VersionTuple(10, 13), "OSX");
 
   } else if (target.isiOS()) {
     // Includes both iOS and TVOS.
-    return isSDKTooOld(sdkPath, clang::VersionTuple(10, 0), "Simulator", "OS");
+    return isSDKTooOld(sdkPath, clang::VersionTuple(11, 0), "Simulator", "OS");
 
   } else if (target.isWatchOS()) {
-    return isSDKTooOld(sdkPath, clang::VersionTuple(3, 0), "Simulator", "OS");
+    return isSDKTooOld(sdkPath, clang::VersionTuple(4, 0), "Simulator", "OS");
 
   } else {
     return false;
@@ -1301,7 +1317,11 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
 
   OI.SelectedSanitizer = SanitizerKind::None;
   if (const Arg *A = Args.getLastArg(options::OPT_sanitize_EQ))
-    OI.SelectedSanitizer = parseSanitizerArgValues(A, TC.getTriple(), Diags);
+    OI.SelectedSanitizer = parseSanitizerArgValues(
+        A, TC.getTriple(), Diags,
+        [&](StringRef sanitizerName) {
+          return TC.sanitizerRuntimeLibExists(Args, sanitizerName);
+        });
 
   // Check that the sanitizer coverage flags are supported if supplied.
   if (const Arg *A = Args.getLastArg(options::OPT_sanitize_coverage_EQ))

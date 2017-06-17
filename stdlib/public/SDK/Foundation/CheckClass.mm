@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+#include <objc/runtime.h>
+
 #include "swift/Runtime/Metadata.h"
 
 @interface NSKeyedUnarchiver (SwiftAdditions)
@@ -35,9 +37,8 @@
   if (theClass->getFlags() & swift::ClassFlags::HasCustomObjCName)
     return 0;
 
-  const char *className = [NSStringFromClass(cls) UTF8String];
-
   // Is it a mangled name?
+  const char *className = class_getName(cls);
   if (!(className[0] == '_' && className[1] == 'T'))
     return 0;
   // Is it a name in the form <module>.<class>? Note: the module name could
