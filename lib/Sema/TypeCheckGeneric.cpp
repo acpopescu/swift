@@ -218,6 +218,7 @@ Type CompleteGenericTypeResolver::resolveDependentMemberType(
       if (auto proto =
             concrete->getDeclContext()
               ->getAsProtocolOrProtocolExtensionContext()) {
+        TC.validateDecl(proto);
         auto subMap = SubstitutionMap::getProtocolSubstitutions(
                         proto, baseTy, ProtocolConformanceRef(proto));
         return concrete->getDeclaredInterfaceType().subst(subMap);
@@ -523,7 +524,8 @@ static bool checkGenericFuncSignature(TypeChecker &tc,
           fn->getBodyResultTypeLoc().getTypeRepr()) {
         auto source =
           GenericSignatureBuilder::FloatingRequirementSource::forInferred(
-                                      fn->getBodyResultTypeLoc().getTypeRepr());
+              fn->getBodyResultTypeLoc().getTypeRepr(),
+              /*quietly=*/true);
         builder->inferRequirements(*func->getParentModule(),
                                    fn->getBodyResultTypeLoc(),
                                    source);
@@ -965,7 +967,8 @@ static bool checkGenericSubscriptSignature(TypeChecker &tc,
   if (genericParams && builder) {
     auto source =
       GenericSignatureBuilder::FloatingRequirementSource::forInferred(
-                                  subscript->getElementTypeLoc().getTypeRepr());
+          subscript->getElementTypeLoc().getTypeRepr(),
+          /*quietly=*/true);
 
     builder->inferRequirements(*subscript->getParentModule(),
                                subscript->getElementTypeLoc(),
@@ -980,9 +983,10 @@ static bool checkGenericSubscriptSignature(TypeChecker &tc,
                                        resolver);
 
   // Infer requirements from the pattern.
-  if (builder)
+  if (builder) {
     builder->inferRequirements(*subscript->getParentModule(), params,
                                genericParams);
+  }
 
   return badType;
 }

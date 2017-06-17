@@ -147,6 +147,19 @@ static bool canUseStaticDispatch(SILGenFunction &SGF,
   return false;
 }
 
+static SILValue getOriginalSelfValue(SILValue selfValue) {
+  if (auto *BBI = dyn_cast<BeginBorrowInst>(selfValue))
+    selfValue = BBI->getOperand();
+
+  while (auto *UI = dyn_cast<UpcastInst>(selfValue))
+    selfValue = UI->getOperand();
+
+  if (auto *UTBCI = dyn_cast<UncheckedTrivialBitCastInst>(selfValue))
+    selfValue = UTBCI->getOperand();
+
+  return selfValue;
+}
+
 namespace {
 
 /// Abstractly represents a callee, which may be a constant or function value,
@@ -288,9 +301,7 @@ public:
                                SILDeclRef c,
                                SubstitutionList subs,
                                SILLocation l) {
-    while (auto *UI = dyn_cast<UpcastInst>(selfValue))
-      selfValue = UI->getOperand();
-
+    selfValue = getOriginalSelfValue(selfValue);
     auto formalType = getConstantFormalInterfaceType(SGF, c);
     return Callee(Kind::SuperMethod, SGF, selfValue, c,
                   formalType, formalType, subs, l);
@@ -857,13 +868,17 @@ public:
 
     auto afd = dyn_cast<AbstractFunctionDecl>(e->getDecl());
 
+    CaptureInfo captureInfo;
+
     // Otherwise, we have a statically-dispatched call.
-    SubstitutionList subs;
-    if (e->getDeclRef().isSpecialized() &&
-        (!afd ||
-         !afd->getDeclContext()->isLocalContext() ||
-         afd->getCaptureInfo().hasGenericParamCaptures()))
-      subs = e->getDeclRef().getSubstitutions();
+    SubstitutionList subs = e->getDeclRef().getSubstitutions();
+
+    if (afd) {
+      captureInfo = SGF.SGM.Types.getLoweredLocalCaptures(afd);
+      if (afd->getDeclContext()->isLocalContext() &&
+          !captureInfo.hasGenericParamCaptures())
+        subs = SubstitutionList();
+    }
 
     // Enum case constructor references are open-coded.
     if (isa<EnumElementDecl>(e->getDecl()))
@@ -873,7 +888,7 @@ public:
     
     // If the decl ref requires captures, emit the capture params.
     if (afd) {
-      if (SGF.SGM.M.Types.hasLoweredLocalCaptures(afd)) {
+      if (!captureInfo.getCaptures().empty()) {
         SmallVector<ManagedValue, 4> captures;
         SGF.emitCaptures(e, afd, CaptureEmission::ImmediateApplication,
                          captures);
@@ -4273,12 +4288,8 @@ RValue CallEmission::applyPartiallyAppliedSuperMethod(
   auto loc = uncurriedLoc.getValue();
   auto subs = callee.getSubstitutions();
   auto upcastedSelf = uncurriedArgs.back();
-  SILValue upcastedSelfValue = upcastedSelf.getValue();
-  // Support stripping off a borrow.
-  if (auto *borrowedSelf = dyn_cast<BeginBorrowInst>(upcastedSelfValue)) {
-    upcastedSelfValue = borrowedSelf->getOperand();
-  }
-  SILValue self = cast<UpcastInst>(upcastedSelfValue)->getOperand();
+  auto upcastedSelfValue = upcastedSelf.getValue();
+  auto self = getOriginalSelfValue(upcastedSelfValue);
   auto constantInfo = SGF.getConstantInfo(callee.getMethodName());
   auto functionTy = constantInfo.getSILType();
   SILValue superMethodVal =
@@ -4888,6 +4899,15 @@ static Callee getBaseAccessorFunctionRef(SILGenFunction &SGF,
                                          bool isDirectUse,
                                          SubstitutionList subs) {
   auto *decl = cast<AbstractFunctionDecl>(constant.getDecl());
+
+  // The accessor might be a local function that does not capture any
+  // generic parameters, in which case we don't want to pass in any
+  // substitutions.
+  auto captureInfo = SGF.SGM.Types.getLoweredLocalCaptures(decl);
+  if (decl->getDeclContext()->isLocalContext() &&
+      !captureInfo.hasGenericParamCaptures()) {
+    subs = SubstitutionList();
+  }
 
   // If this is a method in a protocol, generate it as a protocol call.
   if (isa<ProtocolDecl>(decl->getDeclContext())) {

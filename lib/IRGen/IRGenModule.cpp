@@ -127,9 +127,9 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
       ClangCodeGen(createClangCodeGenerator(Context, LLVMContext, irgen.Opts,
                                             ModuleName)),
       Module(*ClangCodeGen->GetModule()), LLVMContext(Module.getContext()),
-      DataLayout(target->createDataLayout()), Triple(Context.LangOpts.Target),
-      TargetMachine(std::move(target)), silConv(irgen.SIL),
-      OutputFilename(OutputFilename),
+      DataLayout(target->createDataLayout()),
+      Triple(irgen.getEffectiveClangTriple()), TargetMachine(std::move(target)),
+      silConv(irgen.SIL), OutputFilename(OutputFilename),
       TargetInfo(SwiftTargetInfo::get(*this)), DebugInfo(nullptr),
       ModuleHash(nullptr), ObjCInterop(Context.LangOpts.EnableObjCInterop),
       Types(*new TypeConverter(*this)) {
@@ -758,11 +758,8 @@ void IRGenerator::addLazyWitnessTable(const ProtocolConformance *Conf) {
   }
 }
 
-void IRGenerator::addClassForArchiveNameRegistration(ClassDecl *ClassDecl) {
-
-  // Those two attributes are interesting to us
-  if (!ClassDecl->getAttrs().hasAttribute<NSKeyedArchiverClassNameAttr>() &&
-      !ClassDecl->getAttrs().hasAttribute<StaticInitializeObjCMetadataAttr>())
+void IRGenerator::addClassForEagerInitialization(ClassDecl *ClassDecl) {
+  if (!ClassDecl->getAttrs().hasAttribute<StaticInitializeObjCMetadataAttr>())
     return;
 
   // Exclude some classes where those attributes make no sense but could be set
@@ -775,7 +772,7 @@ void IRGenerator::addClassForArchiveNameRegistration(ClassDecl *ClassDecl) {
   if (ClassDecl->hasClangNode())
     return;
 
-  ClassesForArchiveNameRegistration.push_back(ClassDecl);
+  ClassesForEagerInitialization.push_back(ClassDecl);
 }
 
 llvm::AttributeSet IRGenModule::getAllocAttrs() {
@@ -1185,4 +1182,11 @@ IRGenModule *IRGenerator::getGenModule(SILFunction *f) {
     return IGM;
 
   return getPrimaryIGM();
+}
+
+llvm::Triple IRGenerator::getEffectiveClangTriple() {
+  auto CI = static_cast<ClangImporter *>(
+      &*SIL.getASTContext().getClangModuleLoader());
+  assert(CI && "no clang module loader");
+  return llvm::Triple(CI->getTargetInfo().getTargetOpts().Triple);
 }

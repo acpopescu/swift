@@ -6824,6 +6824,9 @@ Expr *ExprRewriter::finishApply(ApplyExpr *apply, Type openedType,
   
   auto fn = apply->getFn();
 
+  bool hasTrailingClosure =
+    isa<CallExpr>(apply) && cast<CallExpr>(apply)->hasTrailingClosure();
+
   auto finishApplyOfDeclWithSpecialTypeCheckingSemantics
     = [&](ApplyExpr *apply,
           ValueDecl *decl,
@@ -6832,9 +6835,26 @@ Expr *ExprRewriter::finishApply(ApplyExpr *apply, Type openedType,
       case DeclTypeCheckingSemantics::TypeOf: {
         // Resolve into a DynamicTypeExpr.
         auto arg = apply->getArg();
+
+        SmallVector<Identifier, 2> argLabelsScratch;
+
+        auto fnType = cs.getType(fn)->getAs<FunctionType>();
+        arg = coerceCallArguments(arg, fnType->getInput(),
+                                  apply,
+                                  apply->getArgumentLabels(argLabelsScratch),
+                                  hasTrailingClosure,
+                                  locator.withPathElement(
+                                    ConstraintLocator::ApplyArgument));
+        if (!arg) {
+          return nullptr;
+        }
+
+        if (auto shuffle = dyn_cast<TupleShuffleExpr>(arg))
+          arg = shuffle->getSubExpr();
+
         if (auto tuple = dyn_cast<TupleExpr>(arg))
           arg = tuple->getElements()[0];
-        arg = cs.coerceToRValue(arg);
+
         auto replacement = new (tc.Context)
           DynamicTypeExpr(apply->getFn()->getLoc(),
                           apply->getArg()->getStartLoc(),
@@ -6998,8 +7018,6 @@ Expr *ExprRewriter::finishApply(ApplyExpr *apply, Type openedType,
   SmallVector<Identifier, 2> argLabelsScratch;
   if (auto fnType = cs.getType(fn)->getAs<FunctionType>()) {
     auto origArg = apply->getArg();
-    bool hasTrailingClosure =
-      isa<CallExpr>(apply) && cast<CallExpr>(apply)->hasTrailingClosure();
     Expr *arg = coerceCallArguments(origArg, fnType->getInput(),
                                     apply,
                                     apply->getArgumentLabels(argLabelsScratch),
@@ -7393,32 +7411,15 @@ namespace {
 } // end anonymous namespace
 
 Expr *ConstraintSystem::coerceToRValue(Expr *expr) {
-  // Can't load from an inout value.
-  if (auto *iot = getType(expr)->getAs<InOutType>()) {
-    // Emit a fixit if we can find the & expression that turned this into an
-    // inout.
-    auto &tc = getTypeChecker();
-    if (auto addrOf =
-        dyn_cast<InOutExpr>(expr->getSemanticsProvidingExpr())) {
-      tc.diagnose(expr->getLoc(), diag::load_of_explicit_lvalue,
-                  iot->getObjectType())
-        .fixItRemove(SourceRange(addrOf->getLoc()));
-      return coerceToRValue(addrOf->getSubExpr());
-    } else {
-      tc.diagnose(expr->getLoc(), diag::load_of_explicit_lvalue,
-                  iot->getObjectType());
-      return expr;
-    }
-  }
-
-  // If we already have an rvalue, we're done, otherwise emit a load.
-  if (auto lvalueTy = getType(expr)->getAs<LValueType>()) {
-    propagateLValueAccessKind(expr, AccessKind::Read);
-    return cacheType(new (getASTContext())
-                         LoadExpr(expr, lvalueTy->getObjectType()));
-  }
-
-  return expr;
+  auto &tc = getTypeChecker();
+  return tc.coerceToMaterializable(expr,
+                                   [&](Expr *expr) {
+                                     return getType(expr);
+                                   },
+                                   [&](Expr *expr, Type type) {
+                                     expr->setType(type);
+                                     cacheType(expr);
+                                   });
 }
 
 /// Emit the fixes computed as part of the solution, returning true if we were
@@ -7637,6 +7638,10 @@ Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
     diagnoseFailureForExpr(expr);
     return nullptr;
   }
+
+  // Mark any normal conformances used in this solution as "used".
+  for (auto &e : solution.Conformances)
+    TC.markConformanceUsed(e.second, DC);
 
   ExprRewriter rewriter(*this, solution, suppressDiagnostics, skipClosures);
   ExprWalker walker(rewriter);

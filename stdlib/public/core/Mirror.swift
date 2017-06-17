@@ -162,6 +162,8 @@ public struct Mirror {
     return nil
   }
 
+  @_semantics("optimize.sil.specialize.generic.never")
+  @inline(never)
   @_versioned
   internal static func _superclassIterator<Subject>(
     _ subject: Subject, _ ancestorRepresentation: AncestorRepresentation
@@ -856,8 +858,6 @@ extension String {
   ///
   ///     print(String(describing: p))
   ///     // Prints "(21, 30)"
-  ///
-  /// - SeeAlso: `String.init<Subject>(reflecting: Subject)`
   public init<Subject>(describing instance: Subject) {
     self.init()
     _print_unlocked(instance, &self)
@@ -907,8 +907,6 @@ extension String {
   ///
   ///     print(String(reflecting: p))
   ///     // Prints "Point(x: 21, y: 30)"
-  ///
-  /// - SeeAlso: `String.init<Subject>(Subject)`
   public init<Subject>(reflecting subject: Subject) {
     self.init()
     _debugPrint_unlocked(subject, &self)

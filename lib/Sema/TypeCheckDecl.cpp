@@ -1751,11 +1751,12 @@ static void checkTypeAccessibility(
 
   AccessScope contextAccessScope = context->getFormalAccessScope();
   checkTypeAccessibilityImpl(TC, TL, contextAccessScope, DC,
-                             [=](AccessScope requiredAccessScope,
-                                 const TypeRepr *offendingTR,
-                                 DowngradeToWarning downgradeToWarning) {
+                             [=, &TC](AccessScope requiredAccessScope,
+                                      const TypeRepr *offendingTR,
+                                      DowngradeToWarning downgradeToWarning) {
     if (!contextAccessScope.isPublic() &&
-        !isa<ModuleDecl>(contextAccessScope.getDeclContext())) {
+        !isa<ModuleDecl>(contextAccessScope.getDeclContext()) &&
+        TC.getLangOpts().isSwiftVersion3()) {
       // Swift 3.0.0 mistakenly didn't diagnose any issues when the context
       // access scope represented a private or fileprivate level.
       downgradeToWarning = DowngradeToWarning::Yes;
@@ -1868,10 +1869,10 @@ static void checkGenericParamAccessibility(TypeChecker &TC,
 
   // Swift 3.0.0 mistakenly didn't diagnose any issues when the context access
   // scope represented a private or fileprivate level.
-  // FIXME: Conditionalize this on Swift 3 mode.
   if (downgradeToWarning == DowngradeToWarning::No) {
     if (!accessScope.isPublic() &&
-        !isa<ModuleDecl>(accessScope.getDeclContext())) {
+        !isa<ModuleDecl>(accessScope.getDeclContext()) &&
+        TC.getLangOpts().isSwiftVersion3()) {
       downgradeToWarning = DowngradeToWarning::Yes;
     }
   }
@@ -6138,10 +6139,9 @@ public:
     UNINTERESTING_ATTR(DiscardableResult)
 
     UNINTERESTING_ATTR(ObjCMembers)
+    UNINTERESTING_ATTR(ObjCRuntimeName)
     UNINTERESTING_ATTR(Implements)
-    UNINTERESTING_ATTR(NSKeyedArchiverClassName)
     UNINTERESTING_ATTR(StaticInitializeObjCMetadata)
-    UNINTERESTING_ATTR(NSKeyedArchiverEncodeNonGenericSubclassesOnly)
     UNINTERESTING_ATTR(DowngradeExhaustivityCheck)
 #undef UNINTERESTING_ATTR
 
@@ -7022,6 +7022,13 @@ static Optional<ObjCReason> shouldMarkClassAsObjC(TypeChecker &TC,
 
   if (auto attr = CD->getAttrs().getAttribute<ObjCAttr>()) {
     if (kind == ObjCClassKind::ObjCMembers) {
+      if (attr->hasName() && !CD->isGenericContext()) {
+        // @objc with a name on a non-generic subclass of a generic class is
+        // just controlling the runtime name. Don't diagnose this case.
+        CD->getAttrs().add(new (TC.Context) ObjCRuntimeNameAttr(*attr));
+        return None;
+      }
+
       TC.diagnose(attr->getLocation(), diag::objc_for_generic_class)
         .fixItRemove(attr->getRangeWithAt());
     }
@@ -7042,6 +7049,27 @@ static Optional<ObjCReason> shouldMarkClassAsObjC(TypeChecker &TC,
     return ObjCReason::ImplicitlyObjC;
 
   return None;
+}
+
+/// Validate the underlying type of the given typealias.
+static void validateTypealiasType(TypeChecker &tc, TypeAliasDecl *typeAlias) {
+  TypeResolutionOptions options = TR_TypeAliasUnderlyingType;
+  if (typeAlias->getFormalAccess() <= Accessibility::FilePrivate)
+    options |= TR_KnownNonCascadingDependency;
+
+  if (typeAlias->getDeclContext()->isModuleScopeContext() &&
+      typeAlias->getGenericParams() == nullptr) {
+    IterativeTypeChecker ITC(tc);
+    ITC.satisfy(requestResolveTypeDecl(typeAlias));
+  } else {
+    if (tc.validateType(typeAlias->getUnderlyingTypeLoc(),
+                        typeAlias, options)) {
+      typeAlias->setInvalid();
+      typeAlias->getUnderlyingTypeLoc().setInvalidType(tc.Context);
+    }
+
+    typeAlias->setUnderlyingType(typeAlias->getUnderlyingTypeLoc().getType());
+  }
 }
 
 void TypeChecker::validateDecl(ValueDecl *D) {
@@ -7151,25 +7179,7 @@ void TypeChecker::validateDecl(ValueDecl *D) {
     SWIFT_DEFER { typeAlias->setIsBeingValidated(false); };
 
     validateGenericTypeSignature(typeAlias);
-
-    TypeResolutionOptions options = TR_TypeAliasUnderlyingType;
-    if (typeAlias->getFormalAccess() <= Accessibility::FilePrivate)
-      options |= TR_KnownNonCascadingDependency;
-
-    if (typeAlias->getDeclContext()->isModuleScopeContext() &&
-        typeAlias->getGenericParams() == nullptr) {
-      IterativeTypeChecker ITC(*this);
-      ITC.satisfy(requestResolveTypeDecl(typeAlias));
-    } else {
-      if (validateType(typeAlias->getUnderlyingTypeLoc(),
-                       typeAlias, options)) {
-        typeAlias->setInvalid();
-        typeAlias->getUnderlyingTypeLoc().setInvalidType(Context);
-      }
-
-      typeAlias->setUnderlyingType(typeAlias->getUnderlyingTypeLoc().getType());
-    }
-
+    validateTypealiasType(*this, typeAlias);
     break;
   }
 
@@ -7236,8 +7246,28 @@ void TypeChecker::validateDecl(ValueDecl *D) {
     // FIXME: Hopefully this can all go away with the ITC.
     for (auto member : proto->getMembers()) {
       if (auto *aliasDecl = dyn_cast<TypeAliasDecl>(member)) {
-        if (!aliasDecl->isGeneric())
+        if (!aliasDecl->isGeneric()) {
           aliasDecl->setGenericEnvironment(proto->getGenericEnvironment());
+
+          // If the underlying alias declaration has a type parameter,
+          // we have unresolved dependent member types we will need to deal
+          // with. Wipe out the types and validate them again.
+          // FIXME: We never should have recorded such a type in the first
+          // place.
+          if (!aliasDecl->getUnderlyingTypeLoc().getType() ||
+              aliasDecl->getUnderlyingTypeLoc().getType()
+                ->findUnresolvedDependentMemberType()) {
+            aliasDecl->getUnderlyingTypeLoc().setType(Type(),
+                                                      /*validated=*/false);
+            validateAccessibility(aliasDecl);
+
+            // Check generic parameters, if needed.
+            aliasDecl->setIsBeingValidated();
+            SWIFT_DEFER { aliasDecl->setIsBeingValidated(false); };
+
+            validateTypealiasType(*this, aliasDecl);
+          }
+        }
       }
     }
 
@@ -7679,7 +7709,8 @@ checkExtensionGenericParams(TypeChecker &tc, ExtensionDecl *ext, Type type,
   // Local function used to infer requirements from the extended type.
   auto inferExtendedTypeReqs = [&](GenericSignatureBuilder &builder) {
     auto source =
-      GenericSignatureBuilder::FloatingRequirementSource::forInferred(nullptr);
+      GenericSignatureBuilder::FloatingRequirementSource::forInferred(
+                                          nullptr, /*quietly=*/false);
 
     builder.inferRequirements(*ext->getModuleContext(),
                               TypeLoc::withoutLoc(extInterfaceType),
