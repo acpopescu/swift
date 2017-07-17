@@ -17,6 +17,7 @@
     "StringComparable.swift",
     "StringCore.swift",
     "StringHashable.swift",
+    "StringIndex.swift",
     "StringIndexConversions.swift",
     "StringInterpolation.swift",
     "StringLegacy.swift",
@@ -92,6 +93,7 @@
         "Arrays.swift",
         "CocoaArray.swift",
         "ContiguousArrayBuffer.swift",
+        "FixedArray.swift",
         "SliceBuffer.swift",
         "SwiftNativeNSArray.swift"],
       "HashedCollections": [

@@ -48,9 +48,9 @@ set(SWIFT_BENCH_MODULES
     single-source/DropLast
     single-source/DropWhile
     single-source/ErrorHandling
+    single-source/Exclusivity
     single-source/ExistentialPerformance
     single-source/Fibonacci
-    single-source/GlobalClass
     single-source/Hanoi
     single-source/Hash
     single-source/HashQuadratic
@@ -66,6 +66,7 @@ set(SWIFT_BENCH_MODULES
     single-source/MonteCarloPi
     single-source/NSDictionaryCastToSwift
     single-source/NSError
+    single-source/NSStringAPI
     single-source/NSStringConversion
     single-source/NopDeinit
     single-source/ObjectAllocation

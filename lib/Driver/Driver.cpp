@@ -1153,6 +1153,17 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
       OI.CompilerMode = OutputInfo::Mode::SingleCompile;
       break;
 
+    // BEGIN APPLE-ONLY OUTPUT ACTIONS
+    case options::OPT_index_file:
+      OI.CompilerMode = OutputInfo::Mode::SingleCompile;
+      OI.CompilerOutputType = types::TY_IndexData;
+      break;
+    // END APPLE-ONLY OUTPUT ACTIONS
+
+    case options::OPT_update_code:
+      OI.CompilerOutputType = types::TY_Remapping;
+      OI.LinkAction = LinkKind::None;
+      break;
     case options::OPT_parse:
     case options::OPT_typecheck:
     case options::OPT_dump_parse:
@@ -1329,6 +1340,27 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
                                          OI.SelectedSanitizer);
 }
 
+static void
+currentDependsOnPCHIfPresent(JobAction *PCH,
+                             std::unique_ptr<Action> &Current,
+                             ActionList &Actions) {
+  if (PCH) {
+    // FIXME: When we have a PCH job, it's officially owned by the Actions
+    // array; but it's also a secondary input to each of the current
+    // JobActions, which means that we need to flip the "owns inputs" bit
+    // on the JobActions so they don't try to free it. That in turn means
+    // we need to transfer ownership of all the JobActions' existing
+    // inputs to the Actions array, since the JobActions either own or
+    // don't own _all_ of their inputs. Ownership can't vary
+    // input-by-input.
+    auto *job = cast<JobAction>(Current.get());
+    auto inputs = job->getInputs();
+    Actions.append(inputs.begin(), inputs.end());
+    job->setOwnsInputs(false);
+    job->addInput(PCH);
+  }
+}
+
 void Driver::buildActions(const ToolChain &TC,
                           const DerivedArgList &Args,
                           const InputFileList &Inputs,
@@ -1393,6 +1425,7 @@ void Driver::buildActions(const ToolChain &TC,
           Current.reset(new CompileJobAction(Current.release(),
                                              types::TY_LLVM_BC,
                                              previousBuildState));
+          currentDependsOnPCHIfPresent(PCH, Current, Actions);
           AllModuleInputs.push_back(Current.get());
           Current.reset(new BackendJobAction(Current.release(),
                                              OI.CompilerOutputType, 0));
@@ -1400,22 +1433,8 @@ void Driver::buildActions(const ToolChain &TC,
           Current.reset(new CompileJobAction(Current.release(),
                                              OI.CompilerOutputType,
                                              previousBuildState));
+          currentDependsOnPCHIfPresent(PCH, Current, Actions);
           AllModuleInputs.push_back(Current.get());
-        }
-        if (PCH) {
-          // FIXME: When we have a PCH job, it's officially owned by the Actions
-          // array; but it's also a secondary input to each of the current
-          // JobActions, which means that we need to flip the "owns inputs" bit
-          // on the JobActions so they don't try to free it. That in turn means
-          // we need to transfer ownership of all the JobActions' existing
-          // inputs to the Actions array, since the JobActions either own or
-          // don't own _all_ of their inputs. Ownership can't vary
-          // input-by-input.
-          auto *job = cast<JobAction>(Current.get());
-          auto inputs = job->getInputs();
-          Actions.append(inputs.begin(), inputs.end());
-          job->setOwnsInputs(false);
-          job->addInput(PCH);
         }
         AllLinkerInputs.push_back(Current.release());
         break;
@@ -1449,6 +1468,7 @@ void Driver::buildActions(const ToolChain &TC,
       case types::TY_ClangModuleFile:
       case types::TY_SwiftDeps:
       case types::TY_Remapping:
+      case types::TY_IndexData:
       case types::TY_PCH:
       case types::TY_ImportedModules:
       case types::TY_TBD:

@@ -35,6 +35,14 @@
 using namespace swift;
 using namespace Lowering;
 
+//===----------------------------------------------------------------------===//
+//                             Pattern Utilities
+//===----------------------------------------------------------------------===//
+
+// TODO: These routines should probably be refactored into their own file since
+// they have nothing to do with the implementation of SILGenPattern
+// specifically.
+
 /// Shallow-dump a pattern node one level deep for debug purposes.
 static void dumpPattern(const Pattern *p, llvm::raw_ostream &os) {
   if (!p) {
@@ -290,6 +298,10 @@ static Pattern *getSimilarSpecializingPattern(Pattern *p, Pattern *first) {
   llvm_unreachable("Unhandled PatternKind in switch.");
 }
 
+//===----------------------------------------------------------------------===//
+//                           SILGenPattern Emission
+//===----------------------------------------------------------------------===//
+
 namespace {
 
 /// A row which we intend to specialize.
@@ -467,6 +479,10 @@ private:
 
 /// A handle to a row in a clause matrix. Does not own memory; use of the
 /// ClauseRow must be dominated by its originating ClauseMatrix.
+///
+/// TODO: This should be refactored into a more general formulation that uses a
+/// child template pattern to inject our logic. This will then allow us to
+/// inject "mock" objects in a unittest file.
 class ClauseRow {
   friend class ClauseMatrix;
   
@@ -872,7 +888,7 @@ public:
       assert(operand.getFinalConsumption() !=
                  CastConsumptionKind::TakeOnSuccess &&
              "When compiling with sil ownership take on success is disabled");
-      // No unforwarding is needed, we always copy.
+      // No unforwarding is needed, we always borrow/copy.
       return false;
     }
 
@@ -947,6 +963,7 @@ chooseNecessaryColumn(const ClauseMatrix &matrix, unsigned firstRow) {
   for (unsigned c = 0; c != numColumns; ++c) {
     unsigned constructorPrefix = getConstructorPrefix(matrix, firstRow, c);
     if (constructorPrefix > longestConstructorPrefix) {
+      longestConstructorPrefix = constructorPrefix;
       bestColumn = c;
     }
   }
@@ -1205,12 +1222,12 @@ void PatternMatchEmission::bindVariable(SILLocation loc, VarDecl *var,
   // If this binding is one of multiple patterns, each individual binding
   // will just be let, and then the chosen value will get forwarded into
   // a var box in the final shared case block.
-  bool forcedLet = hasMultipleItems && !var->isLet();
-  if (forcedLet)
-    var->setLet(true);
+  bool forcedLet = var->isLet();
+  if (hasMultipleItems && !var->isLet())
+    forcedLet = true;
   
   // Initialize the variable value.
-  InitializationPtr init = SGF.emitInitializationForVarDecl(var);
+  InitializationPtr init = SGF.emitInitializationForVarDecl(var, forcedLet);
 
   RValue rv(SGF, loc, formalValueType, value.getFinalManagedValue());
   if (shouldTake(value, isIrrefutable)) {
@@ -1218,9 +1235,6 @@ void PatternMatchEmission::bindVariable(SILLocation loc, VarDecl *var,
   } else {
     std::move(rv).copyInto(SGF, loc, init.get());
   }
-  
-  if (forcedLet)
-    var->setLet(false);
 }
 
 /// Evaluate a guard expression and, if it returns false, branch to
@@ -1380,12 +1394,14 @@ static ConsumableManagedValue
 getManagedSubobject(SILGenFunction &SGF, SILValue value,
                     const TypeLowering &valueTL,
                     CastConsumptionKind consumption) {
-  if (consumption != CastConsumptionKind::CopyOnSuccess) {
-    return {SGF.emitManagedRValueWithCleanup(value, valueTL),
-             consumption};
-  } else {
+  if (consumption == CastConsumptionKind::CopyOnSuccess) {
     return {ManagedValue::forUnmanaged(value), consumption};
   }
+
+  assert((!SGF.F.getModule().getOptions().EnableSILOwnership ||
+          consumption != CastConsumptionKind::TakeOnSuccess) &&
+         "TakeOnSuccess should never be used when sil ownership is enabled");
+  return {SGF.emitManagedRValueWithCleanup(value, valueTL), consumption};
 }
 
 static ConsumableManagedValue
@@ -1552,9 +1568,12 @@ emitCastOperand(SILGenFunction &SGF, SILLocation loc,
     // Okay, if all we need to do is drop the value in an address,
     // this is easy.
     if (!hasAbstraction) {
-      SGF.B.emitStoreValueOperation(
-          loc, src.getFinalManagedValue().forward(SGF), init->getAddress(),
-          StoreOwnershipQualifier::Init);
+      ManagedValue finalValue = src.getFinalManagedValue();
+      if (finalValue.getOwnershipKind() == ValueOwnershipKind::Guaranteed)
+        finalValue = finalValue.copy(SGF, loc);
+      SGF.B.emitStoreValueOperation(loc, finalValue.forward(SGF),
+                                    init->getAddress(),
+                                    StoreOwnershipQualifier::Init);
       init->finishInitialization(SGF);
       ConsumableManagedValue result =
         { init->getManagedAddress(), src.getFinalConsumption() };
@@ -2373,12 +2392,13 @@ void PatternMatchEmission::emitSharedCaseBlocks() {
         if (V->isLet()) {
           // Just emit a let with cleanup.
           SGF.VarLocs[V].value = caseBB->getArgument(argIndex++);
-          SGF.emitInitializationForVarDecl(V)->finishInitialization(SGF);
+          SGF.emitInitializationForVarDecl(V, V->isLet())
+            ->finishInitialization(SGF);
         } else {
           // The pattern variables were all emitted as lets and one got passed in,
           // now we finally alloc a box for the var and forward in the chosen value.
           SGF.VarLocs.erase(V);
-          auto newVar = SGF.emitInitializationForVarDecl(V);
+          auto newVar = SGF.emitInitializationForVarDecl(V, V->isLet());
           auto loc = SGF.CurrentSILLoc;
           auto value =
               ManagedValue::forUnmanaged(caseBB->getArgument(argIndex++));
@@ -2616,7 +2636,7 @@ void SILGenFunction::emitSwitchStmt(SwitchStmt *S) {
   // We use std::vector because it supports emplace_back; moving a ClauseRow is
   // expensive.
   std::vector<ClauseRow> clauseRows;
-  clauseRows.reserve(S->getCases().size());
+  clauseRows.reserve(S->getRawCases().size());
   bool hasFallthrough = false;
   for (auto caseBlock : S->getCases()) {
     for (auto &labelItem : caseBlock->getCaseLabelItems()) {

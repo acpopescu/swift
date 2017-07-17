@@ -531,7 +531,7 @@ struct Abc {
 	var value : Builtin.Word
 }
 
-// CHECK-LABEL define hidden {{.*}}@_T08builtins22assumeNonNegative_testBwAA3AbcVzF
+// CHECK-LABEL: define hidden {{.*}}@_T08builtins22assumeNonNegative_testBwAA3AbcVzF
 func assumeNonNegative_test(_ x: inout Abc) -> Builtin.Word {
   // CHECK: load {{.*}}, !range ![[R:[0-9]+]]
   return Builtin.assumeNonNegative_Word(x.value)
@@ -542,7 +542,7 @@ func return_word(_ x: Builtin.Word) -> Builtin.Word {
 	return x
 }
 
-// CHECK-LABEL define hidden {{.*}}@_T08builtins23assumeNonNegative_test2BwAA3AbcVzF
+// CHECK-LABEL: define hidden {{.*}}@_T08builtins23assumeNonNegative_test2BwBwF
 func assumeNonNegative_test2(_ x: Builtin.Word) -> Builtin.Word {
   // CHECK: call {{.*}}, !range ![[R]]
   return Builtin.assumeNonNegative_Word(return_word(x))
@@ -646,29 +646,34 @@ func acceptsBuiltinUnknownObject(_ ref: inout Builtin.UnknownObject?) {}
 // ObjC
 // CHECK-LABEL: define hidden {{.*}}i1 @_T08builtins8isUniqueBi1_BOSgzF({{%.*}}* nocapture dereferenceable({{.*}})) {{.*}} {
 // CHECK-NEXT: entry:
-// CHECK-NEXT: bitcast [[BUILTIN_UNKNOWN_OBJECT_TY]]* %0 to %objc_object**
-// CHECK-NEXT: load %objc_object*, %objc_object** %1
-// CHECK-NEXT: call i1 @swift_isUniquelyReferencedNonObjC(%objc_object* %2)
+// CHECK-NEXT: bitcast [[BUILTIN_UNKNOWN_OBJECT_TY]]* %0 to [[UNKNOWN_OBJECT:%objc_object|%swift\.refcounted]]**
+// CHECK-NEXT: load [[UNKNOWN_OBJECT]]*, [[UNKNOWN_OBJECT]]** %1
+// CHECK-objc-NEXT: call i1 @swift_isUniquelyReferencedNonObjC([[UNKNOWN_OBJECT]]* %2)
+// CHECK-native-NEXT: call i1 @swift_isUniquelyReferenced_native([[UNKNOWN_OBJECT]]* %2)
 // CHECK-NEXT: ret i1 %3
 func isUnique(_ ref: inout Builtin.UnknownObject?) -> Bool {
   return Builtin.isUnique(&ref)
 }
 
 // ObjC nonNull
-// CHECK-LABEL: define hidden {{.*}}i1 @_T08builtins8isUniqueBi1_BOzF(%objc_object** nocapture dereferenceable({{.*}})) {{.*}} {
+// CHECK-LABEL: define hidden {{.*}}i1 @_T08builtins8isUniqueBi1_BOzF
+// CHECK-SAME:    ([[UNKNOWN_OBJECT]]** nocapture dereferenceable({{.*}})) {{.*}} {
 // CHECK-NEXT: entry:
-// CHECK-NEXT: load %objc_object*, %objc_object** %0
-// CHECK-NEXT: call i1 @swift_isUniquelyReferencedNonObjC_nonNull(%objc_object* %1)
+// CHECK-NEXT: load [[UNKNOWN_OBJECT]]*, [[UNKNOWN_OBJECT]]** %0
+// CHECK-objc-NEXT: call i1 @swift_isUniquelyReferencedNonObjC_nonNull([[UNKNOWN_OBJECT]]* %1)
+// CHECK-native-NEXT: call i1 @swift_rt_swift_isUniquelyReferenced_nonNull_native([[UNKNOWN_OBJECT]]* %1)
 // CHECK-NEXT: ret i1 %2
 func isUnique(_ ref: inout Builtin.UnknownObject) -> Bool {
   return Builtin.isUnique(&ref)
 }
 
 // ObjC pinned nonNull
-// CHECK-LABEL: define hidden {{.*}}i1 @_T08builtins16isUniqueOrPinnedBi1_BOzF(%objc_object** nocapture dereferenceable({{.*}})) {{.*}} {
+// CHECK-LABEL: define hidden {{.*}}i1 @_T08builtins16isUniqueOrPinnedBi1_BOzF
+// CHECK-SAME:    ([[UNKNOWN_OBJECT]]** nocapture dereferenceable({{.*}})) {{.*}} {
 // CHECK-NEXT: entry:
-// CHECK-NEXT: load %objc_object*, %objc_object** %0
-// CHECK-NEXT: call i1 @swift_isUniquelyReferencedOrPinnedNonObjC_nonNull(%objc_object* %1)
+// CHECK-NEXT: load [[UNKNOWN_OBJECT]]*, [[UNKNOWN_OBJECT]]** %0
+// CHECK-native-NEXT: call i1 @swift_rt_swift_isUniquelyReferencedOrPinned_nonNull_native([[UNKNOWN_OBJECT]]* %1)
+// CHECK-objc-NEXT: call i1 @swift_isUniquelyReferencedOrPinnedNonObjC_nonNull([[UNKNOWN_OBJECT]]* %1)
 // CHECK-NEXT: ret i1 %2
 func isUniqueOrPinned(_ ref: inout Builtin.UnknownObject) -> Bool {
   return Builtin.isUniqueOrPinned(&ref)

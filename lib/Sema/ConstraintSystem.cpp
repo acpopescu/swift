@@ -21,11 +21,30 @@
 #include "swift/Basic/Statistic.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/Format.h"
 
 using namespace swift;
 using namespace constraints;
 
 #define DEBUG_TYPE "ConstraintSystem"
+
+ExpressionTimer::~ExpressionTimer() {
+  auto elapsed = getElapsedProcessTimeInFractionalSeconds();
+  unsigned elapsedMS = static_cast<unsigned>(elapsed * 1000);
+
+  if (ShouldDump) {
+    // Round up to the nearest 100th of a millisecond.
+    llvm::errs() << llvm::format("%0.2f", ceil(elapsed * 100000) / 100)
+                 << "ms\t";
+    E->getLoc().print(llvm::errs(), Context.SourceMgr);
+    llvm::errs() << "\n";
+  }
+
+  if (WarnLimit != 0 && elapsedMS >= WarnLimit && E->getLoc().isValid())
+    Context.Diags.diagnose(E->getLoc(), diag::debug_long_expression,
+                           elapsedMS, WarnLimit)
+      .highlight(E->getSourceRange());
+}
 
 ConstraintSystem::ConstraintSystem(TypeChecker &tc, DeclContext *dc,
                                    ConstraintSystemOptions options)
@@ -653,7 +672,7 @@ Type TypeChecker::getUnopenedTypeOfReference(VarDecl *value, Type baseType,
                         ? value->getInterfaceType()
                         : value->getType());
 
-  requestedType = requestedType->getLValueOrInOutObjectType()
+  requestedType = requestedType->getWithoutSpecifierType()
     ->getReferenceStorageReferent();
 
   // If we're dealing with contextual types, and we referenced this type from
@@ -1683,7 +1702,7 @@ Type simplifyTypeImpl(ConstraintSystem &cs, Type type, Fn getFixedTypeFn) {
 
       // FIXME: It's kind of weird in general that we have to look
       // through lvalue, inout and IUO types here
-      Type lookupBaseType = newBase->getLValueOrInOutObjectType();
+      Type lookupBaseType = newBase->getWithoutSpecifierType();
 
       auto *module = cs.DC->getParentModule();
 
@@ -1775,8 +1794,7 @@ DeclName OverloadChoice::getName() const {
       // don't currently pre-filter subscript overload sets by argument
       // keywords, so "subscript" is still the name that keypath subscripts
       // are looked up by.
-      auto &C = getBaseType()->getASTContext();
-      return DeclName(C.Id_subscript);
+      return DeclBaseName::createSubscript();
     }
     case OverloadChoiceKind::BaseType:
     case OverloadChoiceKind::TupleIndex:

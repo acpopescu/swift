@@ -342,9 +342,9 @@ class alignas(8) Expr {
   class TupleShuffleExprBitfields {
     friend class TupleShuffleExpr;
     unsigned : NumImplicitConversionExprBits;
-    unsigned IsSourceScalar : 1;
+    unsigned TypeImpact : 2;
   };
-  enum { NumTupleShuffleExprBits = NumImplicitConversionExprBits + 1 };
+  enum { NumTupleShuffleExprBits = NumImplicitConversionExprBits + 2 };
   static_assert(NumTupleShuffleExprBits <= 32, "fits in an unsigned");
 
   class ApplyExprBitfields {
@@ -2804,7 +2804,7 @@ public:
 };
 
 /// TupleShuffleExpr - This represents a permutation of a tuple value to a new
-/// tuple type.  The expression's type is known to be a tuple type.
+/// tuple type.
 ///
 /// If hasScalarSource() is true, the subexpression should be treated
 /// as if it were implicitly injected into a single-element tuple
@@ -2825,9 +2825,22 @@ public:
     CallerDefaultInitialize = -3
   };
 
-  enum SourceIsScalar_t : bool {
-    SourceIsTuple = false,
-    SourceIsScalar = true
+  enum TypeImpact {
+    /// The source value is a tuple which is destructured and modified to
+    /// create the result, which is a tuple.
+    TupleToTuple,
+
+    /// The source value is a tuple which is destructured and modified to
+    /// create the result, which is a scalar because it has one element and
+    /// no labels.
+    TupleToScalar,
+
+    /// The source value is an individual value (possibly one with tuple
+    /// type) which is inserted into a particular position in the result,
+    /// which is a tuple.
+    ScalarToTuple
+
+    // (TupleShuffleExprs are never created for a scalar-to-scalar conversion.)
   };
 
 private:
@@ -2851,29 +2864,35 @@ private:
 
 public:
   TupleShuffleExpr(Expr *subExpr, ArrayRef<int> elementMapping, 
-                   SourceIsScalar_t isSourceScalar,
+                   TypeImpact typeImpact,
                    ConcreteDeclRef defaultArgsOwner,
                    ArrayRef<unsigned> VariadicArgs,
-                   MutableArrayRef<Expr *> CallerDefaultArgs, Type ty)
+                   Type VarargsArrayTy,
+                   MutableArrayRef<Expr *> CallerDefaultArgs,
+                   Type ty)
     : ImplicitConversionExpr(ExprKind::TupleShuffle, subExpr, ty),
-      ElementMapping(elementMapping), VarargsArrayTy(),
+      ElementMapping(elementMapping), VarargsArrayTy(VarargsArrayTy),
       DefaultArgsOwner(defaultArgsOwner), VariadicArgs(VariadicArgs),
       CallerDefaultArgs(CallerDefaultArgs)
   {
-    TupleShuffleExprBits.IsSourceScalar = isSourceScalar;
+    TupleShuffleExprBits.TypeImpact = typeImpact;
   }
 
   ArrayRef<int> getElementMapping() const { return ElementMapping; }
 
-  /// Is the source expression scalar?
-  ///
-  /// This doesn't necessarily mean it's not a tuple; it just means
-  /// that it should be treated as if it were an element of a
-  /// single-element tuple for the purposes of interpreting behavior.
-  bool isSourceScalar() const { return TupleShuffleExprBits.IsSourceScalar; }
+  /// What is the type impact of this shuffle?
+  TypeImpact getTypeImpact() const {
+    return TypeImpact(TupleShuffleExprBits.TypeImpact);
+  }
 
-  /// Set the varargs array type to use.
-  void setVarargsArrayType(Type T) { VarargsArrayTy = T; }
+  bool isSourceScalar() const {
+    return getTypeImpact() == ScalarToTuple;
+  }
+
+  bool isResultScalar() const {
+    return getTypeImpact() == TupleToScalar;
+  }
+
   Type getVarargsArrayType() const {
     assert(!VarargsArrayTy.isNull());
     return VarargsArrayTy;
@@ -4608,25 +4627,28 @@ public:
     
     
     llvm::PointerIntPair<Expr *, 3, Kind> SubscriptIndexExprAndKind;
+    ArrayRef<Identifier> SubscriptLabels;
     Type ComponentType;
     SourceLoc Loc;
     
-    explicit Component(DeclNameOrRef decl,
+    explicit Component(ASTContext *ctxForCopyingLabels,
+                       DeclNameOrRef decl,
                        Expr *indexExpr,
+                       ArrayRef<Identifier> subscriptLabels,
                        Kind kind,
                        Type type,
-                       SourceLoc loc)
-      : Decl(decl), SubscriptIndexExprAndKind(indexExpr, kind),
-        ComponentType(type), Loc(loc)
-    {}
+                       SourceLoc loc);
     
   public:
-    Component() : Component({}, nullptr, Kind::Invalid, Type(), SourceLoc()) {}
+    Component()
+      : Component(nullptr, {}, nullptr, {}, Kind::Invalid, Type(), SourceLoc())
+    {}
     
     /// Create an unresolved component for a property.
     static Component forUnresolvedProperty(DeclName UnresolvedName,
                                            SourceLoc Loc) {
-      return Component(UnresolvedName, nullptr,
+      return Component(nullptr,
+                       UnresolvedName, nullptr, {},
                        Kind::UnresolvedProperty,
                        Type(),
                        Loc);
@@ -4645,15 +4667,20 @@ public:
     ///
     /// You shouldn't add new uses of this overload; use the one that takes a
     /// list of index arguments.
-    static Component forUnresolvedSubscriptWithPrebuiltIndexExpr(Expr *index,
-                                                                 SourceLoc loc){
+    static Component forUnresolvedSubscriptWithPrebuiltIndexExpr(
+                                         ASTContext &context,
+                                         Expr *index,
+                                         ArrayRef<Identifier> subscriptLabels,
+                                         SourceLoc loc) {
       
-      return Component({}, index, Kind::UnresolvedSubscript, Type(), loc);
+      return Component(&context,
+                       {}, index, subscriptLabels, Kind::UnresolvedSubscript,
+                       Type(), loc);
     }
     
     /// Create an unresolved optional force `!` component.
     static Component forUnresolvedOptionalForce(SourceLoc BangLoc) {
-      return Component({}, nullptr,
+      return Component(nullptr, {}, nullptr, {},
                        Kind::OptionalForce,
                        Type(),
                        BangLoc);
@@ -4661,7 +4688,7 @@ public:
     
     /// Create an unresolved optional chain `?` component.
     static Component forUnresolvedOptionalChain(SourceLoc QuestionLoc) {
-      return Component({}, nullptr,
+      return Component(nullptr, {}, nullptr, {},
                        Kind::OptionalChain,
                        Type(),
                        QuestionLoc);
@@ -4671,7 +4698,8 @@ public:
     static Component forProperty(ConcreteDeclRef property,
                                  Type propertyType,
                                  SourceLoc loc) {
-      return Component(property, nullptr, Kind::Property,
+      return Component(nullptr, property, nullptr, {},
+                       Kind::Property,
                        propertyType,
                        loc);
     }
@@ -4692,20 +4720,21 @@ public:
     /// You shouldn't add new uses of this overload; use the one that takes a
     /// list of index arguments.
     static Component forSubscriptWithPrebuiltIndexExpr(
-      ConcreteDeclRef subscript, Expr *index, Type elementType, SourceLoc loc) {
-      return Component(subscript, index, Kind::Subscript, elementType, loc);
-    }
+       ConcreteDeclRef subscript, Expr *index, ArrayRef<Identifier> labels,
+       Type elementType, SourceLoc loc);
     
     /// Create an optional-forcing `!` component.
     static Component forOptionalForce(Type forcedType, SourceLoc bangLoc) {
-      return Component({}, nullptr, Kind::OptionalForce, forcedType,
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalForce, forcedType,
                        bangLoc);
     }
     
     /// Create an optional-chaining `?` component.
     static Component forOptionalChain(Type unwrappedType,
                                       SourceLoc questionLoc) {
-      return Component({}, nullptr, Kind::OptionalChain, unwrappedType,
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalChain, unwrappedType,
                        questionLoc);
     }
     
@@ -4713,7 +4742,8 @@ public:
     /// syntax but may appear when the non-optional result of an optional chain
     /// is implicitly wrapped.
     static Component forOptionalWrap(Type wrappedType) {
-      return Component({}, nullptr, Kind::OptionalWrap, wrappedType,
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalWrap, wrappedType,
                        SourceLoc());
     }
     
@@ -4763,7 +4793,23 @@ public:
         llvm_unreachable("no index expr for this kind");
       }
     }
-    
+
+    ArrayRef<Identifier> getSubscriptLabels() const {
+      switch (getKind()) {
+      case Kind::Subscript:
+      case Kind::UnresolvedSubscript:
+        return SubscriptLabels;
+        
+      case Kind::Invalid:
+      case Kind::OptionalChain:
+      case Kind::OptionalWrap:
+      case Kind::OptionalForce:
+      case Kind::UnresolvedProperty:
+      case Kind::Property:
+        llvm_unreachable("no subscript labels for this kind");
+      }
+    }
+
     DeclName getUnresolvedDeclName() const {
       switch (getKind()) {
       case Kind::UnresolvedProperty:

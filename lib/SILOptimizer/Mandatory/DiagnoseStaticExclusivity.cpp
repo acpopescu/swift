@@ -500,38 +500,45 @@ static bool isCallToStandardLibrarySwap(CallExpr *CE, ASTContext &Ctx) {
 }
 #endif
 
-/// Do a sytactic pattern match to try to safely suggest a Fix-It to rewrite
-/// calls like swap(&collection[index1], &collection[index2]) to
+/// Do a syntactic pattern match to determine whether the call is a call
+/// to swap(&base[index1], &base[index2]), which can
+/// be replaced with a call to MutableCollection.swapAt(_:_:) on base.
+///
+/// Returns true if the call can be replaced. Returns the call expression,
+/// the base expression, and the two indices as out expressions.
 ///
 /// This method takes an array of all the ApplyInsts for calls to swap()
-/// in the function to avoid need to construct a parent map over the AST
+/// in the function to avoid needing to construct a parent map over the AST
 /// to find the CallExpr for the inout accesses.
-static void
-tryFixItWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
-                                  const BeginAccessInst *Access2,
-                                  ArrayRef<ApplyInst *> CallsToSwap,
-                                  ASTContext &Ctx,
-                                  InFlightDiagnostic &Diag) {
+static bool
+canReplaceWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
+                                     const BeginAccessInst *Access2,
+                                     ArrayRef<ApplyInst *> CallsToSwap,
+                                     ASTContext &Ctx,
+                                     CallExpr *&FoundCall,
+                                     Expr *&Base,
+                                     Expr *&Index1,
+                                     Expr *&Index2) {
   if (CallsToSwap.empty())
-    return;
+    return false;
 
   // Inout arguments must be modifications.
   if (Access1->getAccessKind() != SILAccessKind::Modify ||
       Access2->getAccessKind() != SILAccessKind::Modify) {
-    return;
+    return false;
   }
 
   SILLocation Loc1 = Access1->getLoc();
   SILLocation Loc2 = Access2->getLoc();
   if (Loc1.isNull() || Loc2.isNull())
-    return;
+    return false;
 
   auto *InOut1 = Loc1.getAsASTNode<InOutExpr>();
   auto *InOut2 = Loc2.getAsASTNode<InOutExpr>();
   if (!InOut1 || !InOut2)
-    return;
+    return false;
 
-  CallExpr *FoundCall = nullptr;
+  FoundCall = nullptr;
   // Look through all the calls to swap() recorded in the function to find
   // which one we're diagnosing.
   for (ApplyInst *AI : CallsToSwap) {
@@ -554,22 +561,22 @@ tryFixItWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
     }
   }
   if (!FoundCall)
-    return;
+    return false;
 
   // We found a call to swap(&e1, &e2). Now check to see whether it
   // matches the form swap(&someCollection[index1], &someCollection[index2]).
   auto *SE1 = dyn_cast<SubscriptExpr>(InOut1->getSubExpr());
   if (!SE1)
-    return;
+    return false;
   auto *SE2 = dyn_cast<SubscriptExpr>(InOut2->getSubExpr());
   if (!SE2)
-    return;
+    return false;
 
   // Do the two subscripts refer to the same subscript declaration?
   auto *Decl1 = cast<SubscriptDecl>(SE1->getDecl().getDecl());
   auto *Decl2 = cast<SubscriptDecl>(SE2->getDecl().getDecl());
   if (Decl1 != Decl2)
-    return;
+    return false;
 
   ProtocolDecl *MutableCollectionDecl = Ctx.getMutableCollectionDecl();
 
@@ -594,7 +601,7 @@ tryFixItWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
   }
 
   if (!IsSubscriptOnMutableCollection)
-    return;
+    return false;
 
   // We're swapping two subscripts on mutable collections -- but are they
   // the same collection? Approximate this by checking for textual
@@ -605,24 +612,33 @@ tryFixItWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
   StringRef Base2Text = extractExprText(SE2->getBase(), SM);
 
   if (Base1Text != Base2Text)
-    return;
+    return false;
 
-  auto *Index1 = dyn_cast<ParenExpr>(SE1->getIndex());
-  if (!Index1)
-    return;
+  auto *Index1Paren = dyn_cast<ParenExpr>(SE1->getIndex());
+  if (!Index1Paren)
+    return false;
 
-  auto *Index2 = dyn_cast<ParenExpr>(SE2->getIndex());
-  if (!Index2)
-    return;
+  auto *Index2Paren = dyn_cast<ParenExpr>(SE2->getIndex());
+  if (!Index2Paren)
+    return false;
 
-  StringRef Index1Text = extractExprText(Index1->getSubExpr(), SM);
-  StringRef Index2Text = extractExprText(Index2->getSubExpr(), SM);
+  Base = SE1->getBase();
+  Index1 = Index1Paren->getSubExpr();
+  Index2 = Index2Paren->getSubExpr();
+  return true;
+}
 
-  // Suggest replacing with call with a call to swapAt().
+/// Suggest replacing with call with a call to swapAt().
+static void addSwapAtFixit(InFlightDiagnostic &Diag, CallExpr *&FoundCall,
+                           Expr *Base, Expr *&Index1, Expr *&Index2,
+                           SourceManager &SM) {
+  StringRef BaseText = extractExprText(Base, SM);
+  StringRef Index1Text = extractExprText(Index1, SM);
+  StringRef Index2Text = extractExprText(Index2, SM);
   SmallString<64> FixItText;
   {
     llvm::raw_svector_ostream Out(FixItText);
-    Out << Base1Text << ".swapAt(" << Index1Text << ", " << Index2Text << ")";
+    Out << BaseText << ".swapAt(" << Index1Text << ", " << Index2Text << ")";
   }
 
   Diag.fixItReplace(FoundCall->getSourceRange(), FixItText);
@@ -635,46 +651,11 @@ tryFixItWithCallToCollectionSwapAt(const BeginAccessInst *Access1,
 static std::string getPathDescription(DeclName BaseName, SILType BaseType,
                                       const IndexTrieNode *SubPath,
                                       SILModule &M) {
-  // Walk the trie to the root to collection the sequence (in reverse order).
-  llvm::SmallVector<unsigned, 4> ReversedIndices;
-  const IndexTrieNode *I = SubPath;
-  while (!I->isRoot()) {
-    ReversedIndices.push_back(I->getIndex());
-    I = I->getParent();
-  }
-
   std::string sbuf;
   llvm::raw_string_ostream os(sbuf);
 
   os << "'" << BaseName;
-
-  SILType ContainingType = BaseType;
-  for (unsigned Index : reversed(ReversedIndices)) {
-    os << ".";
-
-    if (ContainingType.getAs<StructType>()) {
-      NominalTypeDecl *D = ContainingType.getNominalOrBoundGenericNominal();
-      auto Iter = D->getStoredProperties().begin();
-      std::advance(Iter, Index);
-      VarDecl *VD = *Iter;
-      os << VD->getBaseName();
-      ContainingType = ContainingType.getFieldType(VD, M);
-      continue;
-    }
-
-    if (auto TupleTy = ContainingType.getAs<TupleType>()) {
-      Identifier ElementName = TupleTy->getElement(Index).getName();
-      if (ElementName.empty())
-        os << Index;
-      else
-        os << ElementName;
-      ContainingType = ContainingType.getTupleElementType(Index);
-      continue;
-    }
-
-    llvm_unreachable("Unexpected type in projection SubPath!");
-  }
-
+  os << AccessSummaryAnalysis::getSubPathDescription(BaseType, SubPath, M);
   os << "'";
 
   return os.str();
@@ -721,15 +702,27 @@ static void diagnoseExclusivityViolation(const ConflictingAccess &Violation,
     SILModule &M = FirstAccess.getInstruction()->getModule();
     std::string PathDescription = getPathDescription(
         VD->getBaseName(), BaseType, MainAccess.getSubPath(), M);
+
+    // Determine whether we can safely suggest replacing the violation with
+    // a call to MutableCollection.swapAt().
+    bool SuggestSwapAt = false;
+    CallExpr *CallToReplace = nullptr;
+    Expr *Base = nullptr;
+    Expr *SwapIndex1 = nullptr;
+    Expr *SwapIndex2 = nullptr;
+    if (SecondAccess.getRecordKind() == RecordedAccessKind::BeginInstruction) {
+        SuggestSwapAt = canReplaceWithCallToCollectionSwapAt(
+            FirstAccess.getInstruction(), SecondAccess.getInstruction(),
+            CallsToSwap, Ctx, CallToReplace, Base, SwapIndex1, SwapIndex2);
+    }
+
     auto D =
         diagnose(Ctx, MainAccess.getAccessLoc().getSourceLoc(), DiagnosticID,
-                 PathDescription, AccessKindForMain);
+                 PathDescription, AccessKindForMain, SuggestSwapAt);
     D.highlight(RangeForMain);
-    if (SecondAccess.getRecordKind() == RecordedAccessKind::BeginInstruction) {
-      tryFixItWithCallToCollectionSwapAt(FirstAccess.getInstruction(),
-                                         SecondAccess.getInstruction(),
-                                         CallsToSwap, Ctx, D);
-    }
+    if (SuggestSwapAt)
+      addSwapAtFixit(D, CallToReplace, Base, SwapIndex1, SwapIndex2,
+                     Ctx.SourceMgr);
   } else {
     auto DiagnosticID = (Ctx.LangOpts.isSwiftVersion3() ?
                          diag::exclusivity_access_required_unknown_decl_swift3 :
@@ -849,74 +842,56 @@ static bool isCallToStandardLibrarySwap(ApplyInst *AI, ASTContext &Ctx) {
   return FD == Ctx.getSwap(nullptr);
 }
 
-/// If the instruction is a field or tuple projection and it has a single
-/// user return a pair of the single user and the projection index.
-/// Otherwise, return a pair with the component nullptr and the second
-/// unspecified.
-static std::pair<SILInstruction *, unsigned>
-getSingleAddressProjectionUser(SILInstruction *I) {
-  SILInstruction *SingleUser = nullptr;
-  unsigned ProjectionIndex = 0;
-
-  for (Operand *Use : I->getUses()) {
-    SILInstruction *User = Use->getUser();
-    if (isa<BeginAccessInst>(I) && isa<EndAccessInst>(User))
-      continue;
-
-    // We have more than a single user so bail.
-    if (SingleUser)
-      return std::make_pair(nullptr, 0);
-
-    switch (User->getKind()) {
-    case ValueKind::StructElementAddrInst:
-      ProjectionIndex = cast<StructElementAddrInst>(User)->getFieldNo();
-      SingleUser = User;
-      break;
-    case ValueKind::TupleElementAddrInst:
-      ProjectionIndex = cast<TupleElementAddrInst>(User)->getFieldNo();
-      SingleUser = User;
-      break;
-    default:
-      return std::make_pair(nullptr, 0);
-    }
-  }
-
-  return std::make_pair(SingleUser, ProjectionIndex);
-}
-
-/// Returns an IndexTrieNode that represents the single subpath accessed from
-/// BAI or the root if no such node exists.
-static const IndexTrieNode *findSubPathAccessed(BeginAccessInst *BAI,
-                                                IndexTrieNode *Root) {
-  IndexTrieNode *SubPath = Root;
-
-  // For each single-user projection of BAI, construct or get a node
-  // from the trie representing the index of the field or tuple element
-  // accessed by that projection.
-  SILInstruction *Iter = BAI;
-  while (true) {
-    std::pair<SILInstruction *, unsigned> ProjectionUser =
-        getSingleAddressProjectionUser(Iter);
-    if (!ProjectionUser.first)
-      break;
-
-    SubPath = SubPath->getChild(ProjectionUser.second);
-    Iter = ProjectionUser.first;
-  }
-
-  return SubPath;
-}
-
 /// If making an access of the given kind at the given subpath would
 /// would conflict, returns the first recorded access it would conflict
 /// with. Otherwise, returns None.
-Optional<RecordedAccess> shouldReportAccess(const AccessInfo &Info,
-                                            swift::SILAccessKind Kind,
-                                            const IndexTrieNode *SubPath) {
+static Optional<RecordedAccess>
+shouldReportAccess(const AccessInfo &Info,swift::SILAccessKind Kind,
+                   const IndexTrieNode *SubPath) {
   if (Info.alreadyHadConflict())
     return None;
 
   return Info.conflictsWithAccess(Kind, SubPath);
+}
+
+/// For each projection that the summarized function accesses on its
+/// capture, check whether the access conflicts with already-in-progress
+/// access. Returns the most general summarized conflict -- so if there are
+/// two conflicts in the called function and one is for an access to an
+/// aggregate and another is for an access to a projection from the aggregate,
+/// this will return the conflict for the aggregate. This approach guarantees
+/// determinism and makes it more  likely that we'll diagnose the most helpful
+/// conflict.
+static Optional<ConflictingAccess>
+findConflictingArgumentAccess(const AccessSummaryAnalysis::ArgumentSummary &AS,
+                              const AccessedStorage &AccessedStorage,
+                              const AccessInfo &InProgressInfo) {
+  Optional<RecordedAccess> BestInProgressAccess;
+  Optional<RecordedAccess> BestArgAccess;
+
+  for (const auto &MapPair : AS.getSubAccesses()) {
+    const IndexTrieNode *SubPath = MapPair.getFirst();
+    const auto &SubAccess = MapPair.getSecond();
+    SILAccessKind Kind = SubAccess.getAccessKind();
+    auto InProgressAccess = shouldReportAccess(InProgressInfo, Kind, SubPath);
+    if (!InProgressAccess)
+      continue;
+
+    if (!BestArgAccess ||
+        AccessSummaryAnalysis::compareSubPaths(SubPath,
+                                               BestArgAccess->getSubPath())) {
+        SILLocation AccessLoc = SubAccess.getAccessLoc();
+
+        BestArgAccess = RecordedAccess(Kind, AccessLoc, SubPath);
+        BestInProgressAccess = InProgressAccess;
+    }
+  }
+
+  if (!BestArgAccess)
+    return None;
+
+  return ConflictingAccess(AccessedStorage, *BestInProgressAccess,
+                           *BestArgAccess);
 }
 
 /// Use the summary analysis to check whether a call to the given
@@ -940,8 +915,11 @@ static void checkForViolationWithCall(
 
     const AccessSummaryAnalysis::ArgumentSummary &AS =
         FS.getAccessForArgument(CalleeIndex);
-    Optional<SILAccessKind> Kind = AS.getAccessKind();
-    if (!Kind)
+
+    const auto &SubAccesses = AS.getSubAccesses();
+
+    // Is the capture accessed in the callee?
+    if (SubAccesses.size() == 0)
       continue;
 
     SILValue Argument = Arguments[ArgumentIndex];
@@ -949,18 +927,14 @@ static void checkForViolationWithCall(
 
     const AccessedStorage &Storage = findAccessedStorage(Argument);
     auto AccessIt = Accesses.find(Storage);
+
+    // Are there any accesses in progress at the time of the call?
     if (AccessIt == Accesses.end())
       continue;
-    const AccessInfo &Info = AccessIt->getSecond();
 
-    // TODO: For now, treat a summarized access as an access to the whole
-    // address. Once the summary analysis is sensitive to stored properties,
-    // this should be updated look at the subpaths from the summary.
-    const IndexTrieNode *SubPath = ASA->getSubPathTrieRoot();
-    if (auto Conflict = shouldReportAccess(Info, *Kind, SubPath)) {
-      SILLocation AccessLoc = AS.getAccessLoc();
-      const auto &SecondAccess = RecordedAccess(*Kind, AccessLoc, SubPath);
-      ConflictingAccesses.emplace_back(Storage, *Conflict, SecondAccess);
+    const AccessInfo &Info = AccessIt->getSecond();
+    if (auto Conflict = findConflictingArgumentAccess(AS, Storage, Info)) {
+      ConflictingAccesses.push_back(*Conflict);
     }
   }
 }
@@ -985,6 +959,11 @@ static PartialApplyInst *lookThroughForPartialApply(SILValue V) {
 /// if any of the @inout_aliasable captures passed to those closures have
 /// in-progress accesses that would conflict with any access the summary
 /// says the closure would perform.
+//
+/// TODO: We currently fail to statically diagnose non-escaping closures pased
+/// via @block_storage convention. To enforce this case, we should statically
+/// recognize when the apply takes a block argument that has been initialized to
+/// a non-escaping closure.
 static void checkForViolationsInNoEscapeClosures(
     const StorageMap &Accesses, FullApplySite FAS, AccessSummaryAnalysis *ASA,
     llvm::SmallVectorImpl<ConflictingAccess> &ConflictingAccesses) {
@@ -1082,8 +1061,7 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
         SILAccessKind Kind = BAI->getAccessKind();
         const AccessedStorage &Storage = findAccessedStorage(BAI->getSource());
         AccessInfo &Info = Accesses[Storage];
-        const IndexTrieNode *SubPath =
-            findSubPathAccessed(BAI, ASA->getSubPathTrieRoot());
+        const IndexTrieNode *SubPath = ASA->findSubPathAccessed(BAI);
         if (auto Conflict = shouldReportAccess(Info, Kind, SubPath)) {
           ConflictingAccesses.emplace_back(Storage, *Conflict,
                                            RecordedAccess(BAI, SubPath));
@@ -1098,8 +1076,7 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
         AccessInfo &Info = It->getSecond();
 
         BeginAccessInst *BAI = EAI->getBeginAccess();
-        const IndexTrieNode *SubPath =
-            findSubPathAccessed(BAI, ASA->getSubPathTrieRoot());
+        const IndexTrieNode *SubPath = ASA->findSubPathAccessed(BAI);
         Info.endAccess(EAI, SubPath);
 
         // If the storage location has no more in-progress accesses, remove

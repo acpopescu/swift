@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -enable-large-loadable-types %s -emit-ir | %FileCheck %s
+// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -enable-large-loadable-types %s -emit-ir | %FileCheck %s --check-prefix=CHECK --check-prefix=CHECK-%target-ptrsize
 
 public struct BigStruct {
   var i0 : Int32 = 0
@@ -53,9 +53,9 @@ public func f3_uses_f2() {
 }
 
 // CHECK-LABEL: define{{( protected)?}} swiftcc void @_T022big_types_corner_cases10f3_uses_f2yyF()
-// CHECK: call swiftcc void @_T022big_types_corner_cases9BigStructVACycfC(%T22big_types_corner_cases9BigStructV* noalias nocapture sret
+// CHECK:call swiftcc void @_T022big_types_corner_cases9BigStructVACycfC(%T22big_types_corner_cases9BigStructV* nocapture dereferenceable
 // CHECK: call swiftcc { i8*, %swift.refcounted* } @_T022big_types_corner_cases13f2_returns_f1AA9BigStructVADcyF()
-// CHECK: call swiftcc void %16(%T22big_types_corner_cases9BigStructV* noalias nocapture sret %call.aggresult1, %T22big_types_corner_cases9BigStructV* noalias nocapture dereferenceable
+// CHECK: call swiftcc void {{.*}}(%T22big_types_corner_cases9BigStructV* nocapture dereferenceable({{.*}}) {{.*}}, %T22big_types_corner_cases9BigStructV* noalias nocapture dereferenceable({{.*}}) {{.*}}, %swift.refcounted* swiftself {{.*}})
 // CHECK: ret void
 
 public func f4_tuple_use_of_f2() {
@@ -69,7 +69,7 @@ public func f4_tuple_use_of_f2() {
 // CHECK: [[TUPLE:%.*]] = call swiftcc { i8*, %swift.refcounted* } @_T022big_types_corner_cases13f2_returns_f1AA9BigStructVADcyF()
 // CHECK: [[TUPLE_EXTRACT:%.*]] = extractvalue { i8*, %swift.refcounted* } [[TUPLE]], 0
 // CHECK: [[CAST_EXTRACT:%.*]] = bitcast i8* [[TUPLE_EXTRACT]] to void (%T22big_types_corner_cases9BigStructV*, %T22big_types_corner_cases9BigStructV*, %swift.refcounted*)*
-// CHECK:  call swiftcc void [[CAST_EXTRACT]](%T22big_types_corner_cases9BigStructV* noalias nocapture sret %call.aggresult1, %T22big_types_corner_cases9BigStructV* noalias nocapture dereferenceable
+// CHECK:  call swiftcc void [[CAST_EXTRACT]](%T22big_types_corner_cases9BigStructV* nocapture dereferenceable({{.*}}) {{.*}}, %T22big_types_corner_cases9BigStructV* noalias nocapture dereferenceable({{.*}}) {{.*}}, %swift.refcounted* swiftself %{{.*}})
 // CHECK: ret void
 
 public class BigClass {
@@ -83,7 +83,7 @@ public class BigClass {
   }
 }
 
-// CHECK-LABEL define{{( protected)?}} hidden swiftcc void @_T022big_types_corner_cases8BigClassC03useE6StructyAA0eH0V0aH0_tF(%T22big_types_corner_cases9BigStructV* noalias nocapture dereferenceable({{.*}}), %T22big_types_corner_cases8BigClassC* swiftself) #0 {
+// CHECK-LABEL: define{{( protected)?}} hidden swiftcc void @_T022big_types_corner_cases8BigClassC03useE6StructyAA0eH0V0aH0_tF(%T22big_types_corner_cases9BigStructV* noalias nocapture dereferenceable({{.*}}), %T22big_types_corner_cases8BigClassC* swiftself) #0 {
 // CHECK: getelementptr inbounds %T22big_types_corner_cases8BigClassC, %T22big_types_corner_cases8BigClassC*
 // CHECK: call void @_T0SqWy
 // CHECK: [[BITCAST:%.*]] = bitcast i8* {{.*}} to void (%T22big_types_corner_cases9BigStructV*, %swift.refcounted*)*
@@ -111,3 +111,28 @@ class Foo {
 // CHECK: getelementptr inbounds void (i8*, %swift.refcounted*, %T22big_types_corner_cases3FooC*)*, void (i8*, %swift.refcounted*, %T22big_types_corner_cases3FooC*)**
 // CHECK: call noalias %swift.refcounted* @swift_rt_swift_allocObject(%swift.type* getelementptr inbounds (%swift.full_boxmetadata, %swift.full_boxmetadata*
 // CHECK: ret { i8*, %swift.refcounted* }
+
+public enum LargeEnum {
+  public enum InnerEnum {
+    case simple(Int64)
+    case hard(Int64, String?)
+  }
+  case Empty1
+  case Empty2
+  case Full(InnerEnum)
+}
+
+public func enumCallee(_ x: LargeEnum) {
+  switch x {
+    case .Full(let inner): print(inner)
+    case .Empty1: break
+    case .Empty2: break
+  }
+}
+// CHECK-LABEL-64: define{{( protected)?}} swiftcc void @_T022big_types_corner_cases10enumCalleeyAA9LargeEnumOF(%T22big_types_corner_cases9LargeEnumO* noalias nocapture dereferenceable(34)) #0 {
+// CHECK-64: alloca %T22big_types_corner_cases9LargeEnumO05InnerF0O
+// CHECK-64: alloca %T22big_types_corner_cases9LargeEnumO
+// CHECK-64: call void @llvm.memcpy.p0i8.p0i8.i64
+// CHECK-64: call void @llvm.memcpy.p0i8.p0i8.i64
+// CHECK-64: call %swift.type* @_T0ypMa()
+// CHECK-64: ret void

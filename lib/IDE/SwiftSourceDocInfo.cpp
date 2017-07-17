@@ -185,6 +185,21 @@ bool SemaLocResolver::walkToExprPre(Expr *E) {
         ContainerType = ME->getBase()->getType();
       }
     }
+
+    // Keep track of trailing expressions.
+    if (!E->isImplicit() && E->getStartLoc() == LocToResolve)
+      TrailingExprStack.push_back(E);
+  }
+  return true;
+}
+
+bool SemaLocResolver::walkToExprPost(Expr *E) {
+  if (isDone())
+    return false;
+  if (!TrailingExprStack.empty() && TrailingExprStack.back() == E) {
+    // We return the outtermost expression in the token info.
+    SemaTok = { TrailingExprStack.front() };
+    return false;
   }
   return true;
 }
@@ -277,7 +292,7 @@ void ResolvedRangeInfo::print(llvm::raw_ostream &OS) {
   }
 
   for (auto &VD : DeclaredDecls) {
-    OS << "<Declared>" << VD.VD->getNameStr() << "</Declared>";
+    OS << "<Declared>" << VD.VD->getBaseName() << "</Declared>";
     OS << "<OutscopeReference>";
     if (VD.ReferredAfterRange)
       OS << "true";
@@ -286,7 +301,7 @@ void ResolvedRangeInfo::print(llvm::raw_ostream &OS) {
     OS << "</OutscopeReference>\n";
   }
   for (auto &RD : ReferencedDecls) {
-    OS << "<Referenced>" << RD.VD->getNameStr() << "</Referenced>";
+    OS << "<Referenced>" << RD.VD->getBaseName() << "</Referenced>";
     OS << "<Type>";
     RD.Ty->print(OS);
     OS << "</Type>\n";
@@ -1009,8 +1024,7 @@ void swift::ide::getLocationInfo(const ValueDecl *VD,
       NameLen = getCharLength(SM, R);
     } else {
       if (VD->hasName()) {
-        // TODO: Handle special names
-        NameLen = VD->getBaseName().getIdentifier().getLength();
+        NameLen = VD->getBaseName().userFacingName().size();
       } else {
         NameLen = getCharLength(SM, VD->getLoc());
       }

@@ -36,6 +36,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstddef>
 #include <functional>
@@ -113,6 +114,35 @@ public:
 
     return None;
   }
+};
+
+
+class ExpressionTimer {
+  Expr* E;
+  unsigned WarnLimit;
+  bool ShouldDump;
+  ASTContext &Context;
+  llvm::TimeRecord StartTime = llvm::TimeRecord::getCurrentTime();
+
+public:
+  ExpressionTimer(Expr *E, bool shouldDump, unsigned warnLimit,
+                  ASTContext &Context)
+      : E(E), WarnLimit(warnLimit), ShouldDump(shouldDump), Context(Context) {
+  }
+
+  ~ExpressionTimer();
+
+  /// Return the elapsed process time (including fractional seconds)
+  /// as a double.
+  double getElapsedProcessTimeInFractionalSeconds() {
+    llvm::TimeRecord endTime = llvm::TimeRecord::getCurrentTime(false);
+
+    return endTime.getProcessTime() - StartTime.getProcessTime();
+  }
+
+  // Disable emission of warnings about expressions that take longer
+  // than the warning threshold.
+  void disableWarning() { WarnLimit = 0; }
 };
 
 } // end namespace constraints
@@ -750,6 +780,10 @@ enum class ConstraintSystemFlags {
   /// Set if the client prefers fixits to be in the form of force unwrapping
   /// or optional chaining to return an optional.
   PreferForceUnwrapToOptional = 0x02,
+
+  /// If set, this is going to prevent constraint system from erasing all
+  /// discovered solutions except the best one.
+  ReturnAllDiscoveredSolutions = 0x04,
 };
 
 /// Options that affect the constraint system as a whole.
@@ -846,6 +880,7 @@ public:
   TypeChecker &TC;
   DeclContext *DC;
   ConstraintSystemOptions Options;
+  Optional<ExpressionTimer> Timer;
   
   friend class Fix;
   friend class OverloadChoice;
@@ -1252,6 +1287,30 @@ private:
     bool walkToDeclPre(Decl *decl) override { return false; }
   };
 
+  class TransferExprTypes : public ASTWalker {
+    ConstraintSystem &toCS;
+    ConstraintSystem &fromCS;
+
+  public:
+    TransferExprTypes(ConstraintSystem &toCS, ConstraintSystem &fromCS)
+        : toCS(toCS), fromCS(fromCS) {}
+
+    Expr *walkToExprPost(Expr *expr) override {
+      if (fromCS.hasType(expr))
+        toCS.setType(expr, fromCS.getType(expr));
+
+      return expr;
+    }
+
+    /// \brief Ignore statements.
+    std::pair<bool, Stmt *> walkToStmtPre(Stmt *stmt) override {
+      return { false, stmt };
+    }
+
+    /// \brief Ignore declarations.
+    bool walkToDeclPre(Decl *decl) override { return false; }
+  };
+
 public:
 
   void setExprTypes(Expr *expr) {
@@ -1275,6 +1334,10 @@ public:
   void cacheSubExprTypes(Expr *expr) {
     bool excludeRoot = true;
     expr->walk(CacheExprTypes(expr, *this, excludeRoot));
+  }
+
+  void transferExprTypes(ConstraintSystem *oldCS, Expr *expr) {
+    expr->walk(TransferExprTypes(*this, *oldCS));
   }
 
   /// \brief The current solver state.
@@ -1378,6 +1441,13 @@ public:
   bool hasFreeTypeVariables();
 
 private:
+  /// \brief Indicates if the constraint system should retain all of the
+  /// solutions it has deduced regardless of their score.
+  bool retainAllSolutions() const {
+    return Options.contains(
+        ConstraintSystemFlags::ReturnAllDiscoveredSolutions);
+  }
+
   /// \brief Finalize this constraint system; we're done attempting to solve
   /// it.
   ///
@@ -1399,8 +1469,28 @@ private:
   /// diagnostic for it and returning true.  If the fixit hint turned out to be
   /// bogus, this returns false and doesn't emit anything.
   bool applySolutionFix(Expr *expr, const Solution &solution, unsigned fixNo);
-  
-  
+
+  /// \brief If there is more than one viable solution,
+  /// attempt to pick the best solution and remove all of the rest.
+  ///
+  /// \param solutions The set of solutions to filter.
+  ///
+  /// \param minimize The flag which idicates if the
+  /// set of solutions should be filtered even if there is
+  /// no single best solution, see `findBestSolution` for
+  /// more details.
+  void filterSolutions(SmallVectorImpl<Solution> &solutions,
+                       bool minimize = false) {
+    if (solutions.size() < 2)
+      return;
+
+    if (auto best = findBestSolution(solutions, minimize)) {
+      if (*best != 0)
+        solutions[0] = std::move(solutions[*best]);
+      solutions.erase(solutions.begin() + 1, solutions.end());
+    }
+  }
+
   /// \brief Restore the type variable bindings to what they were before
   /// we attempted to solve this constraint system.
   ///
@@ -2112,7 +2202,16 @@ public:
   SolutionKind matchFunctionTypes(FunctionType *func1, FunctionType *func2,
                                   ConstraintKind kind, TypeMatchOptions flags,
                                   ConstraintLocatorBuilder locator);
-
+  
+  /// \brief Subroutine of \c matchFunctionTypes(), which matches up the
+  /// parameter types of two function types.
+  SolutionKind matchFunctionParamTypes(ArrayRef<AnyFunctionType::Param> type1,
+                                       ArrayRef<AnyFunctionType::Param> type2,
+                                       Type argType, Type paramType,
+                                       ConstraintKind kind,
+                                       TypeMatchOptions flags,
+                                       ConstraintLocatorBuilder locator);
+  
   /// \brief Subroutine of \c matchTypes(), which matches up a value to a
   /// superclass.
   SolutionKind matchSuperclassTypes(Type type1, Type type2,
@@ -2364,6 +2463,169 @@ public:
   void simplifyDisjunctionChoice(Constraint *choice);
 
 private:
+  /// The kind of bindings that are permitted.
+  enum class AllowedBindingKind : unsigned char {
+    /// Only the exact type.
+    Exact,
+    /// Supertypes of the specified type.
+    Supertypes,
+    /// Subtypes of the specified type.
+    Subtypes
+  };
+
+  /// The kind of literal binding found.
+  enum class LiteralBindingKind : unsigned char {
+    None,
+    Collection,
+    Float,
+    Atom,
+  };
+
+  /// A potential binding from the type variable to a particular type,
+  /// along with information that can be used to construct related
+  /// bindings, e.g., the supertypes of a given type.
+  struct PotentialBinding {
+    /// The type to which the type variable can be bound.
+    Type BindingType;
+
+    /// The kind of bindings permitted.
+    AllowedBindingKind Kind;
+
+    /// The defaulted protocol associated with this binding.
+    Optional<ProtocolDecl *> DefaultedProtocol;
+
+    /// If this is a binding that comes from a \c Defaultable constraint,
+    /// the locator of that constraint.
+    ConstraintLocator *DefaultableBinding = nullptr;
+
+    PotentialBinding(Type type, AllowedBindingKind kind,
+                     Optional<ProtocolDecl *> defaultedProtocol = None,
+                     ConstraintLocator *defaultableBinding = nullptr)
+        : BindingType(type), Kind(kind), DefaultedProtocol(defaultedProtocol),
+          DefaultableBinding(defaultableBinding) {}
+
+    bool isDefaultableBinding() const { return DefaultableBinding != nullptr; }
+  };
+
+  struct PotentialBindings {
+    /// The set of potential bindings.
+    SmallVector<PotentialBinding, 4> Bindings;
+
+    /// Whether this type variable is fully bound by one of its constraints.
+    bool FullyBound = false;
+
+    /// Whether the bindings of this type involve other type variables.
+    bool InvolvesTypeVariables = false;
+
+    /// Whether this type variable has literal bindings.
+    LiteralBindingKind LiteralBinding = LiteralBindingKind::None;
+
+    /// Whether this type variable is only bound above by existential types.
+    bool SubtypeOfExistentialType = false;
+
+    /// The number of defaultable bindings.
+    unsigned NumDefaultableBindings = 0;
+
+    /// Determine whether the set of bindings is non-empty.
+    explicit operator bool() const { return !Bindings.empty(); }
+
+    /// Whether there are any non-defaultable bindings.
+    bool hasNonDefaultableBindings() const {
+      return Bindings.size() > NumDefaultableBindings;
+    }
+
+    /// Compare two sets of bindings, where \c x < y indicates that
+    /// \c x is a better set of bindings that \c y.
+    friend bool operator<(const PotentialBindings &x,
+                          const PotentialBindings &y) {
+      return std::make_tuple(!x.hasNonDefaultableBindings(), x.FullyBound,
+                             x.SubtypeOfExistentialType,
+                             static_cast<unsigned char>(x.LiteralBinding),
+                             x.InvolvesTypeVariables,
+                             -(x.Bindings.size() - x.NumDefaultableBindings)) <
+             std::make_tuple(!y.hasNonDefaultableBindings(), y.FullyBound,
+                             y.SubtypeOfExistentialType,
+                             static_cast<unsigned char>(y.LiteralBinding),
+                             y.InvolvesTypeVariables,
+                             -(y.Bindings.size() - y.NumDefaultableBindings));
+    }
+
+    void foundLiteralBinding(ProtocolDecl *proto) {
+      switch (*proto->getKnownProtocolKind()) {
+      case KnownProtocolKind::ExpressibleByDictionaryLiteral:
+      case KnownProtocolKind::ExpressibleByArrayLiteral:
+      case KnownProtocolKind::ExpressibleByStringInterpolation:
+        LiteralBinding = LiteralBindingKind::Collection;
+        break;
+
+      case KnownProtocolKind::ExpressibleByFloatLiteral:
+        LiteralBinding = LiteralBindingKind::Float;
+        break;
+
+      default:
+        if (LiteralBinding != LiteralBindingKind::Collection)
+          LiteralBinding = LiteralBindingKind::Atom;
+        break;
+      }
+    }
+
+    void dump(TypeVariableType *typeVar, llvm::raw_ostream &out,
+              unsigned indent) const {
+      out.indent(indent);
+      out << "(";
+      if (typeVar)
+        out << "$T" << typeVar->getImpl().getID();
+      if (FullyBound)
+        out << " fully_bound";
+      if (SubtypeOfExistentialType)
+        out << " subtype_of_existential";
+      if (LiteralBinding != LiteralBindingKind::None)
+        out << " literal=" << static_cast<int>(LiteralBinding);
+      if (InvolvesTypeVariables)
+        out << " involves_type_vars";
+      if (NumDefaultableBindings > 0)
+        out << " defaultable_bindings=" << NumDefaultableBindings;
+      out << " bindings=";
+      interleave(Bindings,
+                 [&](const PotentialBinding &binding) {
+                   auto type = binding.BindingType;
+                   auto &ctx = type->getASTContext();
+                   llvm::SaveAndRestore<bool> debugConstraints(
+                       ctx.LangOpts.DebugConstraintSolver, true);
+                   switch (binding.Kind) {
+                   case AllowedBindingKind::Exact:
+                     break;
+
+                   case AllowedBindingKind::Subtypes:
+                     out << "(subtypes of) ";
+                     break;
+
+                   case AllowedBindingKind::Supertypes:
+                     out << "(supertypes of) ";
+                     break;
+                   }
+                   if (binding.DefaultedProtocol)
+                     out << "(default from "
+                         << (*binding.DefaultedProtocol)->getName() << ") ";
+                   out << type.getString();
+                 },
+                 [&]() { out << " "; });
+      out << ")\n";
+    }
+  };
+
+  Optional<Type> checkTypeOfBinding(TypeVariableType *typeVar, Type type,
+                                    bool *isNilLiteral = nullptr);
+  std::pair<PotentialBindings, TypeVariableType *> determineBestBindings();
+  PotentialBindings getPotentialBindings(TypeVariableType *typeVar);
+
+  bool
+  tryTypeVariableBindings(unsigned depth, TypeVariableType *typeVar,
+                          ArrayRef<ConstraintSystem::PotentialBinding> bindings,
+                          SmallVectorImpl<Solution> &solutions,
+                          FreeTypeVariableBinding allowFreeTypeVariables);
+
+private:
   /// \brief Add a constraint to the constraint system.
   SolutionKind addConstraintImpl(ConstraintKind kind, Type first, Type second,
                                  ConstraintLocatorBuilder locator,
@@ -2521,6 +2783,17 @@ public:
   /// \brief Determine if we've already explored too many paths in an
   /// attempt to solve this expression.
   bool getExpressionTooComplex(SmallVectorImpl<Solution> const &solutions) {
+    if (Timer.hasValue()) {
+      auto elapsed = Timer->getElapsedProcessTimeInFractionalSeconds();
+      if (unsigned(elapsed) > TC.getExpressionTimeoutThresholdInSeconds()) {
+        // Disable warnings about expressions that go over the warning
+        // threshold since we're arbitrarily ending evaluation and
+        // emitting an error.
+        Timer->disableWarning();
+        return true;
+      }
+    }
+
     if (!getASTContext().isSwiftVersion3()) {
       if (CountScopes < TypeCounter)
         return false;
@@ -2635,7 +2908,8 @@ public:
 /// the parameters (as described by the given parameter type).
 ///
 /// \param argTuple The arguments.
-/// \param paramTuple The parameters.
+/// \param params The parameters.
+/// \param defaultMap A map indicating if the parameter at that index has a default value.
 /// \param hasTrailingClosure Whether the last argument is a trailing closure.
 /// \param allowFixes Whether to allow fixes when matching arguments.
 ///
@@ -2645,8 +2919,9 @@ public:
 /// \param parameterBindings Will be populated with the arguments that are
 /// bound to each of the parameters.
 /// \returns true if the call arguments could not be matched to the parameters.
-bool matchCallArguments(ArrayRef<CallArgParam> argTuple,
-                        ArrayRef<CallArgParam> paramTuple,
+bool matchCallArguments(ArrayRef<AnyFunctionType::Param> argTuple,
+                        ArrayRef<AnyFunctionType::Param> params,
+                        const SmallVectorImpl<bool> &defaultMap,
                         bool hasTrailingClosure,
                         bool allowFixes,
                         MatchCallArgumentListener &listener,

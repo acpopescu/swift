@@ -406,7 +406,7 @@ namespace {
     if (lti.collectedTypes.size() == 1) {
       // TODO: Compute the BCT.
 
-      auto favoredTy = (*lti.collectedTypes.begin())->getLValueOrInOutObjectType();
+      auto favoredTy = (*lti.collectedTypes.begin())->getWithoutSpecifierType();
 
       CS.setFavoredType(expr, favoredTy.getPointer());
       
@@ -533,7 +533,7 @@ namespace {
                             Type argTy,
                             Type otherArgTy = Type()) {
     // Determine the argument type.
-    argTy = argTy->getLValueOrInOutObjectType();
+    argTy = argTy->getWithoutSpecifierType();
 
     // Do the types match exactly?
     if (paramTy->isEqual(argTy))
@@ -547,7 +547,7 @@ namespace {
 
     // Dig out the second argument type.
     if (otherArgTy)
-      otherArgTy = otherArgTy->getLValueOrInOutObjectType();
+      otherArgTy = otherArgTy->getWithoutSpecifierType();
 
     // If there is another, concrete argument, check whether it's type
     // conforms to the literal protocol and test against it directly.
@@ -696,8 +696,7 @@ namespace {
     auto fTy = VD->getInterfaceType()->getAs<AnyFunctionType>();
     assert(fTy && "attempting to count parameters of a non-function type");
     
-    auto inputTy = fTy->getInput();
-    size_t nOperands = getOperandCount(inputTy);
+    size_t nOperands = fTy->getParams().size();
     size_t nNoDefault = 0;
     
     if (auto AFD = dyn_cast<AbstractFunctionDecl>(VD)) {
@@ -1030,12 +1029,12 @@ namespace {
     /// \brief Add constraints for a subscript operation.
     Type addSubscriptConstraints(Expr *anchor, Type baseTy, Expr *index,
                                  ValueDecl *declOrNull,
-                                 ConstraintLocator *memberLocator = nullptr) {
-      ASTContext &Context = CS.getASTContext();
-
+                                 ConstraintLocator *memberLocator = nullptr,
+                                 ConstraintLocator *indexLocator = nullptr) {
       // Locators used in this expression.
-      auto indexLocator
-        = CS.getConstraintLocator(anchor, ConstraintLocator::SubscriptIndex);
+      if (!indexLocator)
+        indexLocator
+          = CS.getConstraintLocator(anchor, ConstraintLocator::SubscriptIndex);
       auto resultLocator
         = CS.getConstraintLocator(anchor, ConstraintLocator::SubscriptResult);
       
@@ -1055,7 +1054,7 @@ namespace {
         auto baseObjTy = baseTy;
         if (baseObjTy->is<LValueType>()) {
           isLValueBase = true;
-          baseObjTy = baseObjTy->getLValueOrInOutObjectType();
+          baseObjTy = baseObjTy->getWithoutSpecifierType();
         }
         
         if (CS.isArrayType(baseObjTy.getPointer())) {
@@ -1127,7 +1126,7 @@ namespace {
         CS.addBindOverloadConstraint(fnTy, choice, memberLocator,
                                      CurDC);
       } else {
-        CS.addValueMemberConstraint(baseTy, Context.Id_subscript,
+        CS.addValueMemberConstraint(baseTy, DeclBaseName::createSubscript(),
                                     fnTy, CurDC, FunctionRefKind::DoubleApply,
                                     memberLocator);
       }
@@ -1502,7 +1501,7 @@ namespace {
       // subexpr type.
       if (CS.TC.getSelfForInitDelegationInConstructor(CS.DC, expr)) {
         auto baseTy = CS.getType(expr->getBase())
-                        ->getLValueOrInOutObjectType();
+                        ->getWithoutSpecifierType();
 
         // 'self' or 'super' will reference an instance, but the constructor
         // is semantically a member of the metatype. This:
@@ -2712,7 +2711,16 @@ namespace {
       llvm_unreachable("Already type-checked");
     }
     Type visitKeyPathApplicationExpr(KeyPathApplicationExpr *expr) {
-      llvm_unreachable("Already type-checked");
+      // This should only appear in already-type-checked solutions, but we may
+      // need to re-check for failure diagnosis.
+      auto locator = CS.getConstraintLocator(expr);
+      auto projectedTy = CS.createTypeVariable(locator,
+                                               TVO_CanBindToLValue);
+      CS.addKeyPathApplicationConstraint(expr->getKeyPath()->getType(),
+                                         expr->getBase()->getType(),
+                                         projectedTy,
+                                         locator);
+      return projectedTy;
     }
     
     Type visitEnumIsCaseExpr(EnumIsCaseExpr *expr) {
@@ -2796,19 +2804,6 @@ namespace {
                          locator);
       }
       
-      // If a component is already resolved, then all of them should be
-      // resolved, and we can let the expression be. This might happen when
-      // re-checking a failed system for diagnostics.
-      if (E->getComponents().front().isResolved()) {
-        assert([&]{
-          for (auto &c : E->getComponents())
-            if (!c.isResolved())
-              return false;
-          return true;
-        }());
-        return E->getType();
-      }
-      
       bool didOptionalChain = false;
       // We start optimistically from an lvalue base.
       Type base = LValueType::get(root);
@@ -2819,16 +2814,23 @@ namespace {
         case KeyPathExpr::Component::Kind::Invalid:
           break;
         
-        case KeyPathExpr::Component::Kind::UnresolvedProperty: {
+        case KeyPathExpr::Component::Kind::UnresolvedProperty:
+        // This should only appear in resolved ASTs, but we may need to
+        // re-type-check the constraints during failure diagnosis.
+        case KeyPathExpr::Component::Kind::Property: {
           auto memberTy = CS.createTypeVariable(locator,
                                                 TVO_CanBindToLValue |
                                                 TVO_CanBindToInOut);
-          auto refKind = component.getUnresolvedDeclName().isSimpleName()
+          auto lookupName = kind == KeyPathExpr::Component::Kind::UnresolvedProperty
+            ? component.getUnresolvedDeclName()
+            : component.getDeclRef().getDecl()->getFullName();
+          
+          auto refKind = lookupName.isSimpleName()
             ? FunctionRefKind::Unapplied
             : FunctionRefKind::Compound;
           auto memberLocator = CS.getConstraintLocator(E,
                         ConstraintLocator::PathElement::getKeyPathComponent(i));
-          CS.addValueMemberConstraint(base, component.getUnresolvedDeclName(),
+          CS.addValueMemberConstraint(base, lookupName,
                                       memberTy,
                                       CurDC,
                                       refKind,
@@ -2837,26 +2839,25 @@ namespace {
           break;
         }
           
-        case KeyPathExpr::Component::Kind::UnresolvedSubscript: {
+        case KeyPathExpr::Component::Kind::UnresolvedSubscript:
+        // Subscript should only appear in resolved ASTs, but we may need to
+        // re-type-check the constraints during failure diagnosis.
+        case KeyPathExpr::Component::Kind::Subscript: {
+
           auto memberLocator = CS.getConstraintLocator(E,
                         ConstraintLocator::PathElement::getKeyPathComponent(i));
           base = addSubscriptConstraints(E, base, component.getIndexExpr(),
-                                         /*decl*/ nullptr, memberLocator);
+                                         /*decl*/ nullptr, memberLocator,
+                                         /*index locator*/ memberLocator);
           break;
         }
         
         case KeyPathExpr::Component::Kind::OptionalChain: {
           didOptionalChain = true;
           
-          // TODO: This currently crashes the compiler in some cases, so short-
-          // circuit out.
-          if (!CS.TC.Context.LangOpts.EnableExperimentalKeyPathComponents) {
-            return ErrorType::get(CS.TC.Context);
-          }
-          
           // We can't assign an optional back through an optional chain
           // today. Force the base to an rvalue.
-          auto rvalueTy = CS.createTypeVariable(locator, TVO_CanBindToInOut);
+          auto rvalueTy = CS.createTypeVariable(locator, 0);
           CS.addConstraint(ConstraintKind::Equal, base, rvalueTy, locator);
           base = rvalueTy;
           LLVM_FALLTHROUGH;
@@ -2873,11 +2874,13 @@ namespace {
           break;
         }
         
-        case KeyPathExpr::Component::Kind::Property:
-        case KeyPathExpr::Component::Kind::Subscript:
-        case KeyPathExpr::Component::Kind::OptionalWrap:
-          llvm_unreachable("already resolved");
-        }        
+        case KeyPathExpr::Component::Kind::OptionalWrap: {
+          // This should only appear in resolved ASTs, but we may need to
+          // re-type-check the constraints during failure diagnosis.
+          base = OptionalType::get(base);
+          break;
+        }
+        }
       }
       
       // If there was an optional chaining component, the end result must be

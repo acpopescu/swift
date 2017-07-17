@@ -676,7 +676,9 @@ namespace {
 
       OS << " requirement signature=";
       if (PD->isRequirementSignatureComputed()) {
-        OS << PD->getRequirementSignature()->getAsString();
+        OS << GenericSignature::get({PD->getProtocolSelfType()} ,
+                                    PD->getRequirementSignature())
+                ->getAsString();
       } else {
         OS << "<null>";
       }
@@ -1522,9 +1524,12 @@ public:
   void visitSwitchStmt(SwitchStmt *S) {
     printCommon(S, "switch_stmt") << '\n';
     printRec(S->getSubjectExpr());
-    for (CaseStmt *C : S->getCases()) {
+    for (auto N : S->getRawCases()) {
       OS << '\n';
-      printRec(C);
+      if (N.is<Stmt*>())
+        printRec(N.get<Stmt*>());
+      else
+        printRec(N.get<Decl*>());
     }
     PrintWithColorRAII(OS, ParenthesisColor) << ')';
   }
@@ -1978,7 +1983,17 @@ public:
   }
   void visitTupleShuffleExpr(TupleShuffleExpr *E) {
     printCommon(E, "tuple_shuffle_expr");
-    if (E->isSourceScalar()) OS << " source_is_scalar";
+    switch (E->getTypeImpact()) {
+    case TupleShuffleExpr::ScalarToTuple:
+      OS << " scalar_to_tuple";
+      break;
+    case TupleShuffleExpr::TupleToTuple:
+      OS << " tuple_to_tuple";
+      break;
+    case TupleShuffleExpr::TupleToScalar:
+      OS << " tuple_to_scalar";
+      break;
+    }
     OS << " elements=[";
     for (unsigned i = 0, e = E->getElementMapping().size(); i != e; ++i) {
       if (i) OS << ", ";
@@ -2635,7 +2650,7 @@ public:
 
     for (auto elem : T->getElements()) {
       OS << '\n';
-      printRec(elem);
+      printRec(elem.Type);
     }
     PrintWithColorRAII(OS, ParenthesisColor) << ')';
   }

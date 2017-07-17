@@ -109,6 +109,9 @@ def disable_target_os_checking :
 def enable_astscope_lookup : Flag<["-"], "enable-astscope-lookup">,
   HelpText<"Enable ASTScope-based unqualified name lookup">;
 
+def enable_recursive_constraints : Flag<["-"], "enable-recursive-constraints">,
+  HelpText<"Enable SE-0157: Recursive Protocol Constraints">;
+
 def print_clang_stats : Flag<["-"], "print-clang-stats">,
   HelpText<"Print Clang importer statistics">;
 
@@ -294,6 +297,9 @@ def disable_tsan_inout_instrumentation : Flag<["-"],
   "disable-tsan-inout-instrumentation">,
   HelpText<"Disable treatment of inout parameters as Thread Sanitizer accesses">;
 
+def report_errors_to_debugger : Flag<["-"], "report-errors-to-debugger">,
+  HelpText<"Invoke the debugger hook on fatalError calls">;
+
 def enable_infer_import_as_member :
   Flag<["-"], "enable-infer-import-as-member">,
   HelpText<"Infer when a global could be imported as a member">;
@@ -325,6 +331,8 @@ def warn_long_expression_type_checking : Separate<["-"], "warn-long-expression-t
   HelpText<"Warns when type-checking a function takes longer than <n> ms">;
 def warn_long_expression_type_checking_EQ : Joined<["-"], "warn-long-expression-type-checking=">,
   Alias<warn_long_expression_type_checking>;
+
+def solver_expression_time_threshold_EQ : Joined<["-"], "solver-expression-time-threshold=">;
 
 def enable_source_import : Flag<["-"], "enable-source-import">,
   HelpText<"Enable importing of Swift source files">;
@@ -366,6 +374,9 @@ def sil_link_all : Flag<["-"], "sil-link-all">,
 def sil_serialize_all : Flag<["-"], "sil-serialize-all">,
   HelpText<"Serialize all generated SIL">;
 
+def sil_serialize_witness_tables : Flag<["-"], "sil-serialize-witness-tables">,
+  HelpText<"Serialize eligible SIL witness tables">;
+
 def sil_verify_all : Flag<["-"], "sil-verify-all">,
   HelpText<"Verify SIL after each transform">;
 
@@ -405,6 +416,9 @@ def verify_type_layout : JoinedOrSeparate<["-"], "verify-type-layout">,
 def external_pass_pipeline_filename : Separate<["-"], "external-pass-pipeline-filename">,
     HelpText<"Use the pass pipeline defined by <pass_pipeline_file>">,
     MetaVarName<"<pass_pipeline_file>">;
+
+def index_system_modules : Flag<["-"], "index-system-modules">,
+  HelpText<"Emit index data for imported serialized swift system modules">;
 
 def dump_interface_hash : Flag<["-"], "dump-interface-hash">,
    HelpText<"Parse input file(s) and dump interface token hash(es)">,

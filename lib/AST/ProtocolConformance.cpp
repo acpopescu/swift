@@ -25,9 +25,14 @@
 #include "swift/AST/Types.h"
 #include "swift/AST/TypeWalker.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/SaveAndRestore.h"
+
+#define DEBUG_TYPE "AST"
+
+STATISTIC(NumConformanceLookupTables, "# of conformance lookup tables built");
 
 using namespace swift;
 
@@ -311,7 +316,7 @@ void NormalProtocolConformance::setSignatureConformances(
 
 #if !NDEBUG
   unsigned idx = 0;
-  for (auto req : getProtocol()->getRequirementSignature()->getRequirements()) {
+  for (const auto &req : getProtocol()->getRequirementSignature()) {
     if (req.getKind() == RequirementKind::Conformance) {
       assert(idx < conformances.size());
       assert(conformances[idx].getRequirement() ==
@@ -596,8 +601,7 @@ NormalProtocolConformance::getAssociatedConformance(Type assocType,
          "signature conformances not yet computed");
 
   unsigned conformanceIndex = 0;
-  for (auto &reqt :
-         getProtocol()->getRequirementSignature()->getRequirements()) {
+  for (const auto &reqt : getProtocol()->getRequirementSignature()) {
     if (reqt.getKind() == RequirementKind::Conformance) {
       // Is this the conformance we're looking for?
       if (reqt.getFirstType()->isEqual(assocType) &&
@@ -918,6 +922,7 @@ void NominalTypeDecl::prepareConformanceTable() const {
   auto resolver = ctx.getLazyResolver();
   ConformanceTable = new (ctx) ConformanceLookupTable(ctx, mutableThis,
                                                       resolver);
+  ++NumConformanceLookupTables;
 
   // If this type declaration was not parsed from source code or introduced
   // via the Clang importer, don't add any synthesized conformances.

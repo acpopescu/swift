@@ -694,7 +694,7 @@ Type TypeBase::replaceCovariantResultType(Type newResultType,
 
   // Determine the input and result types of this function.
   auto fnType = this->castTo<AnyFunctionType>();
-  Type inputType = fnType->getInput();
+  auto inputType = fnType->getParams();
   Type resultType =
     fnType->getResult()->replaceCovariantResultType(newResultType,
                                                     uncurryLevel - 1);
@@ -709,13 +709,13 @@ Type TypeBase::replaceCovariantResultType(Type newResultType,
   return FunctionType::get(inputType, resultType, fnType->getExtInfo());
 }
 
-SmallVector<CallArgParam, 4>
+SmallVector<AnyFunctionType::Param, 4>
 swift::decomposeArgType(Type type, ArrayRef<Identifier> argumentLabels) {
-  SmallVector<CallArgParam, 4> result;
+  SmallVector<AnyFunctionType::Param, 4> result;
   switch (type->getKind()) {
   case TypeKind::Tuple: {
     auto tupleTy = cast<TupleType>(type.getPointer());
-
+    
     // If we have one argument label but a tuple argument with > 1 element,
     // put the whole tuple into the argument.
     // FIXME: This horribleness is due to the mis-modeling of arguments as
@@ -724,45 +724,38 @@ swift::decomposeArgType(Type type, ArrayRef<Identifier> argumentLabels) {
       // Break out to do the default thing below.
       break;
     }
-
+    
     for (auto i : range(0, tupleTy->getNumElements())) {
       const auto &elt = tupleTy->getElement(i);
-      assert(elt.getParameterFlags().isNone() &&
+      assert((elt.getParameterFlags().isNone() ||
+              elt.getParameterFlags().isInOut()) &&
              "Vararg, autoclosure, or escaping argument tuple"
              "doesn't make sense");
-      CallArgParam argParam;
-      argParam.Ty = elt.getType();
-      argParam.Label = argumentLabels[i];
-      result.push_back(argParam);
+      result.push_back(AnyFunctionType::Param(elt.getType(),
+                                              argumentLabels[i], {}));
     }
     return result;
   }
-
+    
   case TypeKind::Paren: {
-    CallArgParam argParam;
-    argParam.Ty = cast<ParenType>(type.getPointer())->getUnderlyingType();
-    result.push_back(argParam);
+    auto ty = cast<ParenType>(type.getPointer())->getUnderlyingType();
+    result.push_back(AnyFunctionType::Param(ty, Identifier(), {}));
     return result;
   }
-
+    
   default:
     // Default behavior below; inject the argument as the sole parameter.
     break;
   }
-
+  
   // Just inject this parameter.
-  assert(result.empty());
-  CallArgParam argParam;
-  argParam.Ty = type;
-  assert(argumentLabels.size() == 1);
-  argParam.Label = argumentLabels[0];
-  result.push_back(argParam);
+  assert(result.empty() && (argumentLabels.size() == 1));
+  result.push_back(AnyFunctionType::Param(type, argumentLabels[0], {}));
   return result;
 }
 
-SmallVector<CallArgParam, 4>
-swift::decomposeParamType(Type type, const ValueDecl *paramOwner,
-                          unsigned level) {
+void swift::computeDefaultMap(Type type, const ValueDecl *paramOwner,
+                              unsigned level, SmallVectorImpl<bool> &outDefaultMap) {
   // Find the corresponding parameter list.
   const ParameterList *paramList = nullptr;
   if (paramOwner) {
@@ -774,61 +767,44 @@ swift::decomposeParamType(Type type, const ValueDecl *paramOwner,
         paramList = subscript->getIndices();
     }
   }
-
-  SmallVector<CallArgParam, 4> result;
+  
   switch (type->getKind()) {
   case TypeKind::Tuple: {
     auto tupleTy = cast<TupleType>(type.getPointer());
-
+    
     // FIXME: In the weird case where we have a tuple type that should
     // be wrapped in a ParenType but isn't, just... forget it happened.
     if (paramList && tupleTy->getNumElements() != paramList->size() &&
         paramList->size() == 1)
       paramList = nullptr;
-
+    
     for (auto i : range(0, tupleTy->getNumElements())) {
-      const auto &elt = tupleTy->getElement(i);
-
-      CallArgParam argParam;
-      argParam.Ty = elt.isVararg() ? elt.getVarargBaseTy() : elt.getType();
-      argParam.Label = elt.getName();
-      argParam.HasDefaultArgument =
-          paramList && paramList->get(i)->isDefaultArgument();
-      argParam.parameterFlags = elt.getParameterFlags();
-      result.push_back(argParam);
+      outDefaultMap.push_back(paramList && paramList->get(i)->isDefaultArgument());
     }
     break;
   }
-
+      
   case TypeKind::Paren: {
-    CallArgParam argParam;
-    argParam.Ty = cast<ParenType>(type.getPointer())->getUnderlyingType();
-    argParam.HasDefaultArgument =
-        paramList && paramList->get(0)->isDefaultArgument();
-    result.push_back(argParam);
+    outDefaultMap.push_back(paramList && paramList->get(0)->isDefaultArgument());
     break;
   }
-
+      
   default: {
-    CallArgParam argParam;
-    argParam.Ty = type;
-    result.push_back(argParam);
+    outDefaultMap.push_back(false);
     break;
   }
   }
-
-  return result;
 }
 
 /// Turn a param list into a symbolic and printable representation that does not
 /// include the types, something like (_:, b:, c:)
-std::string swift::getParamListAsString(ArrayRef<CallArgParam> params) {
+std::string swift::getParamListAsString(ArrayRef<AnyFunctionType::Param> params) {
   std::string result = "(";
 
   interleave(params,
-             [&](const CallArgParam &param) {
-               if (param.hasLabel())
-                 result += param.Label.str();
+             [&](const AnyFunctionType::Param &param) {
+               if (!param.getLabel().empty())
+                 result += param.getLabel().str();
                else
                  result += "_";
                result += ":";
@@ -1131,7 +1107,9 @@ CanType TypeBase::getCanonicalType() {
     // Transform the input and result types.
     auto &ctx = function->getInput()->getASTContext();
     auto &mod = *ctx.TheBuiltinModule;
-    auto inputTy = function->getInput()->getCanonicalType(sig, mod);
+    Type inputTy = function->getInput()->getCanonicalType(sig, mod);
+    if (!AnyFunctionType::isCanonicalFunctionInputType(inputTy))
+      inputTy = ParenType::get(ctx, inputTy);
     auto resultTy = function->getResult()->getCanonicalType(sig, mod);
 
     Result = GenericFunctionType::get(sig, inputTy, resultTy,
@@ -1148,6 +1126,10 @@ CanType TypeBase::getCanonicalType() {
   case TypeKind::Function: {
     FunctionType *FT = cast<FunctionType>(this);
     Type In = FT->getInput()->getCanonicalType();
+    if (!AnyFunctionType::isCanonicalFunctionInputType(In)) {
+      In = ParenType::get(In->getASTContext(), In);
+      assert(AnyFunctionType::isCanonicalFunctionInputType(In));
+    }
     Type Out = FT->getResult()->getCanonicalType();
     Result = FunctionType::get(In, Out, FT->getExtInfo());
     break;
@@ -2337,23 +2319,31 @@ namespace {
     Parameter,
     ParameterTupleElement
   };
+
+  enum class OptionalUnwrapping {
+    None,
+    OptionalToOptional,
+    ValueToOptional,
+    OptionalToValue
+  };
 } // end anonymous namespace
 
 static bool matches(CanType t1, CanType t2, TypeMatchOptions matchMode,
-                    ParameterPosition paramPosition, bool insideOptional,
+                    ParameterPosition paramPosition,
+                    OptionalUnwrapping insideOptional,
                     LazyResolver *resolver) {
   if (t1 == t2) return true;
 
   // First try unwrapping optionals.
   // Make sure we only unwrap at most one layer of optional.
-  if (!insideOptional) {
+  if (insideOptional == OptionalUnwrapping::None) {
     // Value-to-optional and optional-to-optional.
     if (auto obj2 = t2.getAnyOptionalObjectType()) {
       // Optional-to-optional.
       if (auto obj1 = t1.getAnyOptionalObjectType()) {
         // Allow T? and T! to freely match one another.
         return matches(obj1, obj2, matchMode, ParameterPosition::NotParameter,
-                       /*insideOptional=*/true, resolver);
+                       OptionalUnwrapping::OptionalToOptional, resolver);
       }
 
       // Value-to-optional.
@@ -2364,7 +2354,7 @@ static bool matches(CanType t1, CanType t2, TypeMatchOptions matchMode,
       if (matchMode.contains(TypeMatchFlags::AllowOverride) ||
           matchMode.contains(TypeMatchFlags::AllowTopLevelOptionalMismatch)) {
         return matches(t1, obj2, matchMode, ParameterPosition::NotParameter,
-                       /*insideOptional=*/true, resolver);
+                       OptionalUnwrapping::ValueToOptional, resolver);
       }
 
     } else if (matchMode.contains(
@@ -2372,7 +2362,7 @@ static bool matches(CanType t1, CanType t2, TypeMatchOptions matchMode,
       // Optional-to-value, normally disallowed.
       if (auto obj1 = t1.getAnyOptionalObjectType()) {
         return matches(obj1, t2, matchMode, ParameterPosition::NotParameter,
-                       /*insideOptional=*/true, resolver);
+                       OptionalUnwrapping::OptionalToValue, resolver);
       }
     }
   }
@@ -2396,14 +2386,14 @@ static bool matches(CanType t1, CanType t2, TypeMatchOptions matchMode,
     if (!tuple1 || tuple1->getNumElements() != tuple2->getNumElements()) {
       if (tuple2->getNumElements() == 1) {
         return matches(t1, tuple2.getElementType(0), matchMode, elementPosition,
-                       /*insideOptional=*/false, resolver);
+                       OptionalUnwrapping::None, resolver);
       }
       return false;
     }
 
     for (auto i : indices(tuple1.getElementTypes())) {
       if (!matches(tuple1.getElementType(i), tuple2.getElementType(i),
-                   matchMode, elementPosition, /*insideOptional=*/false,
+                   matchMode, elementPosition, OptionalUnwrapping::None,
                    resolver)){
         return false;
       }
@@ -2432,22 +2422,32 @@ static bool matches(CanType t1, CanType t2, TypeMatchOptions matchMode,
         ext1 = ext1.withThrows(true);
       }
     }
+    // If specified, allow an escaping function parameter to override a
+    // non-escaping function parameter when the parameter is optional.
+    // Note that this is checking 'ext2' rather than 'ext1' because parameters
+    // must be contravariant for the containing function to be covariant.
+    if (matchMode.contains(
+          TypeMatchFlags::IgnoreNonEscapingForOptionalFunctionParam) &&
+        insideOptional == OptionalUnwrapping::OptionalToOptional) {
+      if (!ext2.isNoEscape())
+        ext1 = ext1.withNoEscape(false);
+    }
     if (ext1 != ext2)
       return false;
 
     // Inputs are contravariant, results are covariant.
     return (matches(fn2.getInput(), fn1.getInput(), matchMode,
-                    ParameterPosition::Parameter, /*insideOptional=*/false,
+                    ParameterPosition::Parameter, OptionalUnwrapping::None,
                     resolver) &&
             matches(fn1.getResult(), fn2.getResult(), matchMode,
-                    ParameterPosition::NotParameter, /*insideOptional=*/false,
+                    ParameterPosition::NotParameter, OptionalUnwrapping::None,
                     resolver));
   }
 
   if (matchMode.contains(TypeMatchFlags::AllowNonOptionalForIUOParam) &&
       (paramPosition == ParameterPosition::Parameter ||
        paramPosition == ParameterPosition::ParameterTupleElement) &&
-      !insideOptional) {
+      insideOptional == OptionalUnwrapping::None) {
     // Allow T to override T! in certain cases.
     if (auto obj1 = t1->getImplicitlyUnwrappedOptionalObjectType()) {
       t1 = obj1->getCanonicalType();
@@ -2470,7 +2470,7 @@ static bool matches(CanType t1, CanType t2, TypeMatchOptions matchMode,
 bool TypeBase::matches(Type other, TypeMatchOptions matchMode,
                        LazyResolver *resolver) {
   return ::matches(getCanonicalType(), other->getCanonicalType(), matchMode,
-                   ParameterPosition::NotParameter, /*insideOptional=*/false,
+                   ParameterPosition::NotParameter, OptionalUnwrapping::None,
                    resolver);
 }
 
@@ -2858,6 +2858,17 @@ Type ProtocolCompositionType::get(const ASTContext &C,
   // TODO: Canonicalize away HasExplicitAnyObject if it is implied
   // by one of our member protocols.
   return build(C, CanTypes, HasExplicitAnyObject);
+}
+
+bool AnyFunctionType::isCanonicalFunctionInputType(Type input) {
+  // Canonically, we should have a tuple type or parenthesized type.
+  if (auto tupleTy = dyn_cast<TupleType>(input.getPointer()))
+    return tupleTy->isCanonical();
+  if (auto parenTy = dyn_cast<ParenType>(input.getPointer()))
+    return parenTy->getUnderlyingType()->isCanonical();
+
+  // FIXME: Still required for the constraint solver.
+  return isa<TypeVariableType>(input.getPointer());
 }
 
 FunctionType *

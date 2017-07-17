@@ -2064,7 +2064,14 @@ Type TypeResolver::resolveAttributedType(TypeAttributes &attrs,
   // Function attributes require a syntactic function type.
   auto *fnRepr = dyn_cast<FunctionTypeRepr>(repr);
 
-  if (hasFunctionAttr && fnRepr && (options & TR_SILType)) {
+  if (!fnRepr) {
+    if (attrs.has(TAK_autoclosure)) {
+      TC.diagnose(attrs.getLoc(TAK_autoclosure),
+                  diag::autoclosure_function_type);
+      attrs.clearAttribute(TAK_autoclosure);
+    }
+    // Fall through to diagnose below.
+  } else if (hasFunctionAttr && (options & TR_SILType)) {
     SILFunctionType::Representation rep;
 
     auto calleeConvention = ParameterConvention::Direct_Unowned;
@@ -2107,8 +2114,7 @@ Type TypeResolver::resolveAttributedType(TypeAttributes &attrs,
 
     ty = resolveSILFunctionType(fnRepr, options, extInfo, calleeConvention);
     if (!ty || ty->hasError()) return ty;
-  } else if (hasFunctionAttr && fnRepr) {
-
+  } else if (hasFunctionAttr) {
     FunctionType::Representation rep = FunctionType::Representation::Swift;
     if (attrs.hasConvention()) {
       auto parsedRep =
@@ -2136,9 +2142,17 @@ Type TypeResolver::resolveAttributedType(TypeAttributes &attrs,
                       : diag::attr_only_on_parameters, "@autoclosure");
       attrs.clearAttribute(TAK_autoclosure);
     }
+    
+    auto *FuncTyInput = dyn_cast<TupleTypeRepr>(fnRepr->getArgsTypeRepr());
+    if ((!FuncTyInput || FuncTyInput->getNumElements() != 0)
+        && attrs.has(TAK_autoclosure)) {
+      TC.diagnose(attrs.getLoc(TAK_autoclosure),
+                  diag::autoclosure_function_input_nonunit);
+      attrs.clearAttribute(TAK_autoclosure);
+    }
 
     // @noreturn has been replaced with a 'Never' return type.
-    if (fnRepr && attrs.has(TAK_noreturn)) {
+    if (attrs.has(TAK_noreturn)) {
       auto loc = attrs.getLoc(TAK_noreturn);
       auto attrRange = getTypeAttrRangeWithAt(TC, loc);
       auto resultRange = fnRepr->getResultTypeRepr()->getSourceRange();
@@ -2179,8 +2193,7 @@ Type TypeResolver::resolveAttributedType(TypeAttributes &attrs,
           isVariadicFunctionParam && Context.isSwiftVersion3();
 
       // The attribute is meaningless except on parameter types.
-      bool shouldDiagnose = !isFunctionParam && !skipDiagnostic;
-      if (shouldDiagnose) {
+      if (!isFunctionParam && !skipDiagnostic) {
         auto loc = attrs.getLoc(TAK_escaping);
         auto attrRange = getTypeAttrRangeWithAt(TC, loc);
 
@@ -2333,7 +2346,7 @@ Type TypeResolver::resolveASTFunctionType(FunctionTypeRepr *repr,
     if (const auto Tuple = dyn_cast<TupleTypeRepr>(args)) {
       if (Tuple->getNumElements() == 1) {
         if (const auto Void =
-            dyn_cast<SimpleIdentTypeRepr>(Tuple->getElement(0))) {
+            dyn_cast<SimpleIdentTypeRepr>(Tuple->getElementType(0))) {
           if (Void->getIdentifier().str() == "Void") {
             TC.diagnose(args->getStartLoc(), diag::paren_void_probably_void)
               .fixItReplace(args->getSourceRange(), "()");
@@ -2490,13 +2503,13 @@ Type TypeResolver::resolveSILFunctionType(FunctionTypeRepr *repr,
         TC.diagnose(tuple->getEllipsisLoc(), diag::sil_function_ellipsis);
       }
       // SIL functions cannot have parameter names.
-      for (auto nameLoc : tuple->getUnderscoreLocs()) {
-        if (nameLoc.isValid())
-          TC.diagnose(nameLoc, diag::sil_function_input_label);
+      for (auto &element : tuple->getElements()) {
+        if (element.UnderscoreLoc.isValid())
+          TC.diagnose(element.UnderscoreLoc, diag::sil_function_input_label);
       }
 
       for (auto elt : tuple->getElements()) {
-        auto param = resolveSILParameter(elt,
+        auto param = resolveSILParameter(elt.Type,
                                          options | TR_ImmediateFunctionInput);
         params.push_back(param);
         if (!param.getType()) return nullptr;
@@ -2698,12 +2711,12 @@ bool TypeResolver::resolveSILResults(TypeRepr *repr,
                                 Optional<SILResultInfo> &errorResult) {
   if (auto tuple = dyn_cast<TupleTypeRepr>(repr)) {
     bool hadError = false;
-    for (auto nameLoc : tuple->getUnderscoreLocs()) {
-      if (nameLoc.isValid())
-        TC.diagnose(nameLoc, diag::sil_function_output_label);
+    for (auto &element : tuple->getElements()) {
+      if (element.UnderscoreLoc.isValid())
+        TC.diagnose(element.UnderscoreLoc, diag::sil_function_output_label);
     }
     for (auto elt : tuple->getElements()) {
-      if (resolveSingleSILResult(elt, options, ordinaryResults, errorResult))
+      if (resolveSingleSILResult(elt.Type, options, ordinaryResults, errorResult))
         hadError = true;
     }
     return hadError;
@@ -2866,7 +2879,7 @@ Type TypeResolver::resolveTupleType(TupleTypeRepr *repr,
   }
 
   for (unsigned i = 0, end = repr->getNumElements(); i != end; ++i) {
-    auto *tyR = repr->getElement(i);
+    auto *tyR = repr->getElementType(i);
     Type ty;
     Identifier name;
     bool variadic = false;
@@ -2912,7 +2925,7 @@ Type TypeResolver::resolveTupleType(TupleTypeRepr *repr,
         TC.diagnose(repr->getElementNameLoc(0),
                     diag::tuple_single_element)
           .fixItRemoveChars(repr->getElementNameLoc(0),
-                            repr->getElement(0)->getStartLoc());
+                            repr->getElementType(0)->getStartLoc());
       }
 
       elements[0] = TupleTypeElt(elements[0].getType());
@@ -3502,17 +3515,36 @@ bool TypeChecker::isRepresentableInObjC(
         return false;
       }
 
-      // willSet/didSet implementations are never exposed to objc, they are
-      // always directly dispatched from the synthesized setter.
-      if (FD->isObservingAccessor()) {
+      switch (FD->getAccessorKind()) {
+      case AccessorKind::NotAccessor:
+        llvm_unreachable("already checking for accessor-ness");
+
+      case AccessorKind::IsDidSet:
+      case AccessorKind::IsWillSet:
+          // willSet/didSet implementations are never exposed to objc, they are
+          // always directly dispatched from the synthesized setter.
         if (Diagnose) {
           diagnose(AFD->getLoc(), diag::objc_observing_accessor);
           describeObjCReason(*this, AFD, Reason);
         }
         return false;
+
+      case AccessorKind::IsGetter:
+      case AccessorKind::IsSetter:
+        return true;
+
+      case AccessorKind::IsMaterializeForSet:
+        // materializeForSet is synthesized, so never complain about it
+        return false;
+
+      case AccessorKind::IsAddressor:
+      case AccessorKind::IsMutableAddressor:
+        if (Diagnose) {
+          diagnose(AFD->getLoc(), diag::objc_addressor);
+          describeObjCReason(*this, AFD, Reason);
+        }
+        return false;
       }
-      assert(FD->isGetterOrSetter() && "missing diags for other accessors");
-      return true;
     }
 
     unsigned ExpectedParamPatterns = 1;

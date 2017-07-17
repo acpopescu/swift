@@ -1474,8 +1474,10 @@ ParserResult<Expr> Parser::parseExprPostfix(Diag<> ID, bool isExprBasic) {
         peekToken().isNot(tok::period, tok::period_prefix, tok::l_paren)) {
       Identifier name;
       SourceLoc loc = consumeIdentifier(&name);
-      auto pattern = createBindingFromPattern(loc, name,
-                                              InVarOrLetPattern != IVOLP_InVar);
+      auto specifier = (InVarOrLetPattern != IVOLP_InVar)
+                     ? VarDecl::Specifier::Let
+                     : VarDecl::Specifier::Var;
+      auto pattern = createBindingFromPattern(loc, name, specifier);
       Result = makeParserResult(new (Context) UnresolvedPatternExpr(pattern));
       break;
     }
@@ -2146,7 +2148,9 @@ static void printTupleNames(const TypeRepr *typeRepr, llvm::raw_ostream &OS) {
   
   OS << "(";
   unsigned elementIndex = 0;
-  interleave(tupleRepr->getElements(),
+  llvm::SmallVector<TypeRepr *, 10> elementTypes;
+  tupleRepr->getElementTypes(elementTypes);
+  interleave(elementTypes,
              [&](const TypeRepr *element) {
                if (isa<TupleTypeRepr>(element)) {
                  printTupleNames(element, OS);
@@ -2317,8 +2321,11 @@ parseClosureSignatureIfPresent(SmallVectorImpl<CaptureListEntry> &captureList,
       // Create the VarDecl and the PatternBindingDecl for the captured
       // expression.  This uses the parent declcontext (not the closure) since
       // the initializer expression is evaluated before the closure is formed.
+      auto specifierKind = (ownershipKind != Ownership::Weak)
+                         ? VarDecl::Specifier::Let
+                         : VarDecl::Specifier::Var;
       auto *VD = new (Context) VarDecl(/*isStatic*/false,
-                                       /*isLet*/ownershipKind !=Ownership::Weak,
+                                       specifierKind,
                                        /*isCaptureList*/true,
                                        nameLoc, name, Type(), CurDeclContext);
 
@@ -2366,7 +2373,7 @@ parseClosureSignatureIfPresent(SmallVectorImpl<CaptureListEntry> &captureList,
 
         Identifier name = Tok.is(tok::identifier) ?
             Context.getIdentifier(Tok.getText()) : Identifier();
-        auto var = new (Context) ParamDecl(/*IsLet*/ true, SourceLoc(),
+        auto var = new (Context) ParamDecl(VarDecl::Specifier::Owned, SourceLoc(),
                                            SourceLoc(), Identifier(),
                                            Tok.getLoc(), name, Type(), nullptr);
         elements.push_back(var);
@@ -2665,7 +2672,7 @@ Expr *Parser::parseExprAnonClosureArg() {
     StringRef varName = ("$" + Twine(nextIdx)).toStringRef(StrBuf);
     Identifier ident = Context.getIdentifier(varName);
     SourceLoc varLoc = leftBraceLoc;
-    auto *var = new (Context) ParamDecl(/*IsLet*/ true, SourceLoc(),SourceLoc(),
+    auto *var = new (Context) ParamDecl(VarDecl::Specifier::Owned, SourceLoc(),SourceLoc(),
                                         Identifier(), varLoc, ident, Type(),
                                         closure);
     var->setImplicit();

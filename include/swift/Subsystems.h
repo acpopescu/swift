@@ -132,9 +132,9 @@ namespace swift {
                               bool TokenizeInterpolatedString = true,
                               ArrayRef<Token> SplitTokens = ArrayRef<Token>());
 
-  /// \brief Lex and return a vector of `RC<TokenSyntax>` tokens, which include
+  /// \brief Lex and return a vector of `TokenSyntax` tokens, which include
   /// leading and trailing trivia.
-  std::vector<std::pair<RC<syntax::TokenSyntax>,
+  std::vector<std::pair<RC<syntax::RawTokenSyntax>,
                                    syntax::AbsolutePosition>>
   tokenizeWithTrivia(const LangOptions &LangOpts,
                      const SourceManager &SM,
@@ -192,7 +192,8 @@ namespace swift {
                            OptionSet<TypeCheckingFlags> Options,
                            unsigned StartElem = 0,
                            unsigned WarnLongFunctionBodies = 0,
-                           unsigned WarnLongExpressionTypeChecking = 0);
+                           unsigned WarnLongExpressionTypeChecking = 0,
+                           unsigned ExpressionTimeoutThreshold = 0);
 
   /// Once type checking is complete, this walks protocol requirements
   /// to resolve default witnesses.

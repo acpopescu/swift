@@ -1719,7 +1719,7 @@ private:
     os << ")(";
     Type paramsTy = FT->getInput();
     if (auto tupleTy = paramsTy->getAs<TupleType>()) {
-      if (tupleTy->getNumElements() == 0) {
+      if (FT->getParams().empty()) {
         os << "void";
       } else {
         interleave(tupleTy->getElements(),
@@ -2605,9 +2605,8 @@ public:
       assert(*lhs != *rhs && "duplicate top-level decl");
 
       auto getSortName = [](const Decl *D) -> StringRef {
-        // TODO: Handle special names
         if (auto VD = dyn_cast<ValueDecl>(D))
-          return VD->getBaseName().getIdentifier().str();
+          return VD->getBaseName().userFacingName();
 
         if (auto ED = dyn_cast<ExtensionDecl>(D)) {
           auto baseClass = ED->getExtendedType()->getClassOrBoundGenericClass();

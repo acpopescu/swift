@@ -60,33 +60,15 @@ static ParamDecl *buildArgument(SourceLoc loc, DeclContext *DC,
                                 StringRef name,
                                 Type type,
                                 Type interfaceType,
-                                bool isLet) {
+                                VarDecl::Specifier specifier) {
   auto &context = DC->getASTContext();
-  auto *param = new (context) ParamDecl(isLet, SourceLoc(), SourceLoc(),
+  auto *param = new (context) ParamDecl(specifier, SourceLoc(), SourceLoc(),
                                         Identifier(), loc,
                                         context.getIdentifier(name),
                                         type, DC);
   param->setImplicit();
   param->setInterfaceType(interfaceType);
   return param;
-}
-
-static ParamDecl *buildLetArgument(SourceLoc loc, DeclContext *DC,
-                                   StringRef name,
-                                   Type type,
-                                   Type interfaceType) {
-  return buildArgument(loc, DC, name, type, interfaceType, /*isLet*/ true);
-}
-
-static ParamDecl *buildInOutArgument(SourceLoc loc, DeclContext *DC,
-                                     StringRef name,
-                                     Type type,
-                                     Type interfaceType) {
-  return buildArgument(
-      loc, DC, name,
-      InOutType::get(type),
-      InOutType::get(interfaceType),
-      /*isLet*/ false);
 }
 
 static Type getTypeOfStorage(AbstractStorageDecl *storage,
@@ -214,10 +196,11 @@ static FuncDecl *createSetterPrototype(AbstractStorageDecl *storage,
   // Add a "(value : T, indices...)" argument list.
   auto storageType = getTypeOfStorage(storage, false);
   auto storageInterfaceType = getTypeOfStorage(storage, true);
-  valueDecl = buildLetArgument(storage->getLoc(),
-                               storage->getDeclContext(), "value",
-                               storageType,
-                               storageInterfaceType);
+  valueDecl = buildArgument(storage->getLoc(),
+                            storage->getDeclContext(), "value",
+                            storageType,
+                            storageInterfaceType,
+                            VarDecl::Specifier::Owned);
   params.push_back(buildIndexForwardingParamList(storage, valueDecl));
 
   Type setterRetTy = TupleType::getEmpty(TC.Context);
@@ -316,12 +299,14 @@ static FuncDecl *createMaterializeForSetPrototype(AbstractStorageDecl *storage,
   //                           inout storage: Builtin.UnsafeValueBuffer,
   //                           indices...).
   ParamDecl *bufferElements[] = {
-    buildLetArgument(loc, DC, "buffer",
-                     ctx.TheRawPointerType,
-                     ctx.TheRawPointerType),
-    buildInOutArgument(loc, DC, "callbackStorage",
-                       ctx.TheUnsafeValueBufferType,
-                       ctx.TheUnsafeValueBufferType)
+    buildArgument(loc, DC, "buffer",
+                  ctx.TheRawPointerType,
+                  ctx.TheRawPointerType,
+                  VarDecl::Specifier::Owned),
+    buildArgument(loc, DC, "callbackStorage",
+                  InOutType::get(ctx.TheUnsafeValueBufferType),
+                  InOutType::get(ctx.TheUnsafeValueBufferType),
+                  VarDecl::Specifier::InOut)
   };
   params.push_back(buildIndexForwardingParamList(storage, bufferElements));
 
@@ -352,18 +337,15 @@ static FuncDecl *createMaterializeForSetPrototype(AbstractStorageDecl *storage,
       params, TypeLoc::withoutLoc(retTy), DC);
   materializeForSet->setImplicit();
   
-  bool isStatic = storage->isStatic();
-
   // Open-code the setMutating() calculation since we might run before
-  // the setter has been type checked. Also as a hack, always mark the
-  // setter mutating if we're inside a protocol, because it seems some
-  // things break otherwise -- the root cause should be fixed eventually.
+  // the setter has been type checked.
+  Type contextTy = DC->getDeclaredInterfaceType();
   materializeForSet->setMutating(
-      storage->getDeclContext()->getAsProtocolOrProtocolExtensionContext() ||
-      (!setter->getAttrs().hasAttribute<NonMutatingAttr>() &&
-       !storage->isSetterNonMutating()));
+      contextTy && !contextTy->hasReferenceSemantics() &&
+      !setter->getAttrs().hasAttribute<NonMutatingAttr>() &&
+      !storage->isSetterNonMutating());
 
-  materializeForSet->setStatic(isStatic);
+  materializeForSet->setStatic(storage->isStatic());
 
   // materializeForSet is final if the storage is.
   if (storage->isFinal())
@@ -966,7 +948,7 @@ void swift::synthesizeObservingAccessors(VarDecl *VD, TypeChecker &TC) {
     Expr *OldValueExpr
       = createPropertyLoadOrCallSuperclassGetter(Set, VD, TC);
 
-    OldValue = new (Ctx) VarDecl(/*IsStatic*/false, /*IsLet*/true,
+    OldValue = new (Ctx) VarDecl(/*IsStatic*/false, VarDecl::Specifier::Let,
                                  /*IsCaptureList*/false, SourceLoc(),
                                  Ctx.getIdentifier("tmp"), Type(), Set);
     OldValue->setImplicit();
@@ -1089,7 +1071,7 @@ static FuncDecl *completeLazyPropertyGetter(VarDecl *VD, VarDecl *Storage,
   SmallVector<ASTNode, 6> Body;
 
   // Load the existing storage and store it into the 'tmp1' temporary.
-  auto *Tmp1VD = new (Ctx) VarDecl(/*IsStatic*/false, /*IsLet*/true,
+  auto *Tmp1VD = new (Ctx) VarDecl(/*IsStatic*/false, VarDecl::Specifier::Let,
                                    /*IsCaptureList*/false, SourceLoc(),
                                    Ctx.getIdentifier("tmp1"), Type(), Get);
   Tmp1VD->setImplicit();
@@ -1127,7 +1109,7 @@ static FuncDecl *completeLazyPropertyGetter(VarDecl *VD, VarDecl *Storage,
                                   /*implicit*/ true, Ctx));
 
 
-  auto *Tmp2VD = new (Ctx) VarDecl(/*IsStatic*/false, /*IsLet*/true,
+  auto *Tmp2VD = new (Ctx) VarDecl(/*IsStatic*/false, VarDecl::Specifier::Let,
                                    /*IsCaptureList*/false, SourceLoc(),
                                    Ctx.getIdentifier("tmp2"), VD->getType(),
                                    Get);
@@ -1203,8 +1185,11 @@ void TypeChecker::completePropertyBehaviorStorage(VarDecl *VD,
   SmallString<64> NameBuf = VD->getName().str();
   NameBuf += ".storage";
   auto StorageName = Context.getIdentifier(NameBuf);
+  auto storageSpecifier = BehaviorStorage->isSettable(DC)
+                        ? VarDecl::Specifier::Var
+                        : VarDecl::Specifier::Let;
   auto *Storage = new (Context) VarDecl(
-      /*IsStatic*/VD->isStatic(), /*IsLet*/!BehaviorStorage->isSettable(DC),
+      /*IsStatic*/VD->isStatic(), storageSpecifier,
       /*IsCaptureList*/false, VD->getLoc(), StorageName, SubstStorageContextTy,
       DC);
   Storage->setInterfaceType(SubstStorageInterfaceTy);
@@ -1390,7 +1375,8 @@ void TypeChecker::completePropertyBehaviorParameter(VarDecl *VD,
       llvm::raw_svector_ostream names(ParamNameBuf);
       names << "%arg." << i;
     }
-    auto param = new (Context) ParamDecl(/*let*/ true, SourceLoc(), SourceLoc(),
+    auto param = new (Context) ParamDecl(VarDecl::Specifier::Owned,
+                                         SourceLoc(), SourceLoc(),
                                          Identifier(),
                                          SourceLoc(),
                                          Context.getIdentifier(ParamNameBuf),
@@ -1487,7 +1473,8 @@ void TypeChecker::completePropertyBehaviorAccessors(VarDecl *VD,
     if (!fromMutating
         && toAccessor->getImplicitSelfDecl()->isSettable(toAccessor)) {
       selfExpr->setType(selfTy);
-      auto var = new (Context) VarDecl(/*IsStatic*/false, /*IsLet*/false,
+      auto var = new (Context) VarDecl(/*IsStatic*/false,
+                                       VarDecl::Specifier::Var,
                                        /*IsCaptureList*/false, SourceLoc(),
                                        Context.getIdentifier("tempSelf"),
                                        selfTy, fromAccessor);
@@ -1598,7 +1585,7 @@ void TypeChecker::completeLazyVarImplementation(VarDecl *VD) {
   auto StorageTy = OptionalType::get(VD->getType());
   auto StorageInterfaceTy = OptionalType::get(VD->getInterfaceType());
 
-  auto *Storage = new (Context) VarDecl(/*IsStatic*/false, /*IsLet*/false,
+  auto *Storage = new (Context) VarDecl(/*IsStatic*/false, VarDecl::Specifier::Var,
                                         /*IsCaptureList*/false, VD->getLoc(),
                                         StorageName, StorageTy,
                                         VD->getDeclContext());
@@ -1943,7 +1930,7 @@ ConstructorDecl *swift::createImplicitConstructor(TypeChecker &tc,
       }
 
       // Create the parameter.
-      auto *arg = new (context) ParamDecl(/*IsLet*/true, SourceLoc(), 
+      auto *arg = new (context) ParamDecl(VarDecl::Specifier::Owned, SourceLoc(), 
                                           Loc, var->getName(),
                                           Loc, var->getName(), varType, decl);
       arg->setInterfaceType(varInterfaceType);

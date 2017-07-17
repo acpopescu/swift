@@ -338,12 +338,7 @@ public:
     NewProto = Builder.CreateCall(objc_allocateProtocol, protocolName);
     
     // Add the parent protocols.
-    auto *requirementSig = proto->getRequirementSignature();
-    auto conformsTo =
-      requirementSig->getConformsTo(proto->getSelfInterfaceType(),
-                                    *IGF.IGM.getSwiftModule());
-
-    for (auto parentProto : conformsTo) {
+    for (auto parentProto : proto->getInheritedProtocols()) {
       if (!parentProto->isObjC())
         continue;
       llvm::Value *parentRef = IGM.getAddrOfObjCProtocolRef(parentProto,
@@ -626,13 +621,8 @@ void IRGenModule::emitRuntimeRegistration() {
 
       std::function<void(ProtocolDecl*)> orderProtocol
         = [&](ProtocolDecl *proto) {
-          auto *requirementSig = proto->getRequirementSignature();
-          auto conformsTo = requirementSig->getConformsTo(
-              proto->getSelfInterfaceType(),
-              *getSwiftModule());
-
           // Recursively put parents first.
-          for (auto parent : conformsTo)
+          for (auto parent : proto->getInheritedProtocols())
             orderProtocol(parent);
 
           // Skip if we don't need to reify this protocol.
@@ -959,9 +949,9 @@ void IRGenerator::emitEagerClassInitialization() {
                                 llvm::FunctionType::get(IGM->VoidTy, false),
                                 llvm::GlobalValue::PrivateLinkage,
                                 "_swift_eager_class_initialization");
+  IGM->Module.getFunctionList().push_back(RegisterFn);
   IRGenFunction RegisterIGF(*IGM, RegisterFn);
   RegisterFn->setAttributes(IGM->constructInitialAttributes());
-  IGM->Module.getFunctionList().push_back(RegisterFn);
   RegisterFn->setCallingConv(IGM->DefaultCC);
 
   for (ClassDecl *CD : ClassesForEagerInitialization) {
@@ -1522,6 +1512,23 @@ LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo,
   return result;
 }
 
+LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo,
+                       StringRef name,
+                       SILLinkage linkage,
+                       bool isFragile,
+                       bool isSILOnly,
+                       ForDefinition_t isDefinition,
+                       bool isWeakImported) {
+  LinkInfo result;
+  
+  result.Name += name;
+  std::tie(result.Linkage, result.Visibility, result.DLLStorageClass) =
+    getIRLinkage(linkInfo, linkage, isFragile, isSILOnly,
+                 isDefinition, isWeakImported);
+  result.ForDefinition = isDefinition;
+  return result;
+}
+                       
 static bool isPointerTo(llvm::Type *ptrTy, llvm::Type *objTy) {
   return cast<llvm::PointerType>(ptrTy)->getElementType() == objTy;
 }

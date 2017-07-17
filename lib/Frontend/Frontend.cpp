@@ -97,6 +97,12 @@ bool CompilerInstance::setup(const CompilerInvocation &Invok) {
   if (!Invocation.getFrontendOptions().ModuleDocOutputPath.empty())
     Invocation.getLangOptions().AttachCommentsToDecls = true;
 
+  // If we are doing index-while-building, configure lexing and parsing to
+  // remember comments.
+  if (!Invocation.getFrontendOptions().IndexStorePath.empty()) {
+    Invocation.getLangOptions().AttachCommentsToDecls = true;
+  }
+
   Context.reset(new ASTContext(Invocation.getLangOptions(),
                                Invocation.getSearchPathOptions(),
                                SourceMgr, Diagnostics));
@@ -519,7 +525,8 @@ void CompilerInstance::performSema() {
         performTypeChecking(MainFile, PersistentState.getTopLevelContext(),
                             TypeCheckOptions, CurTUElem,
                             options.WarnLongFunctionBodies,
-                            options.WarnLongExpressionTypeChecking);
+                            options.WarnLongExpressionTypeChecking,
+                            options.SolverExpressionTimeThreshold);
       }
       CurTUElem = MainFile.Decls.size();
     } while (!Done);
@@ -548,7 +555,8 @@ void CompilerInstance::performSema() {
         performTypeChecking(*SF, PersistentState.getTopLevelContext(),
                             TypeCheckOptions, /*curElem*/ 0,
                             options.WarnLongFunctionBodies,
-                            options.WarnLongExpressionTypeChecking);
+                            options.WarnLongExpressionTypeChecking,
+                            options.SolverExpressionTimeThreshold);
 
   // Even if there were no source files, we should still record known
   // protocols.

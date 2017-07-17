@@ -492,15 +492,22 @@ static unsigned getCallEditDistance(DeclName argName, DeclName paramName,
   // TODO: maybe ignore certain kinds of missing / present labels for the
   //   first argument label?
   // TODO: word-based rather than character-based?
-  // TODO: Handle special names
+  if (argName.getBaseName().getKind() != paramName.getBaseName().getKind()) {
+    return UnreasonableCallEditDistance;
+  }
+
+  if (argName.getBaseName().getKind() != DeclBaseName::Kind::Normal) {
+    return 0;
+  }
+  assert(argName.getBaseName().getKind() == DeclBaseName::Kind::Normal);
+
   StringRef argBase = argName.getBaseIdentifier().str();
   StringRef paramBase = paramName.getBaseIdentifier().str();
 
   unsigned distance = argBase.edit_distance(paramBase, maxEditDistance);
 
   // Bound the distance to UnreasonableCallEditDistance.
-  if (distance >= maxEditDistance ||
-      distance > (paramBase.size() + 2) / 3) {
+  if (distance >= maxEditDistance || distance > (paramBase.size() + 2) / 3) {
     return UnreasonableCallEditDistance;
   }
 
@@ -562,12 +569,16 @@ void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
                                         SourceLoc nameLoc,
                                         NameLookupOptions lookupOptions,
                                         LookupResult &result,
+                                        GenericSignatureBuilder *gsb,
                                         unsigned maxResults) {
-  // Disable typo-correction if we won't show the diagnostic anyway.
-  if (getLangOpts().DisableTypoCorrection ||
+  // Disable typo-correction if we won't show the diagnostic anyway or if
+  // we've hit our typo correction limit.
+  if (NumTypoCorrections >= getLangOpts().TypoCorrectionLimit ||
       (Diags.hasFatalErrorOccurred() &&
        !Diags.getShowDiagnosticsAfterFatalError()))
     return;
+
+  ++NumTypoCorrections;
 
   // Fill in a collection of the most reasonable entries.
   TopCollection<unsigned, ValueDecl*> entries(maxResults);
@@ -602,7 +613,7 @@ void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
   TypoCorrectionResolver resolver(*this, nameLoc);
   if (baseTypeOrNull) {
     lookupVisibleMemberDecls(consumer, baseTypeOrNull, DC, &resolver,
-                             /*include instance members*/ true);
+                             /*include instance members*/ true, gsb);
   } else {
     lookupVisibleDecls(consumer, DC, &resolver, /*top level*/ true, nameLoc);
   }
@@ -634,13 +645,11 @@ diagnoseTypoCorrection(TypeChecker &tc, DeclNameLoc loc, ValueDecl *decl) {
                         isa<FuncDecl>(decl) ? "method" :
                         "member");
 
-      // TODO: Handle special names
       return tc.diagnose(parentDecl, diag::note_typo_candidate_implicit_member,
                          decl->getBaseName().getIdentifier().str(), kind);
     }
   }
 
-  // TODO: Handle special names
   return tc.diagnose(decl, diag::note_typo_candidate,
                      decl->getBaseName().getIdentifier().str());
 }

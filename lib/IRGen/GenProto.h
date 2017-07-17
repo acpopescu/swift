@@ -117,12 +117,11 @@ namespace irgen {
   /// generics clause.
   void emitPolymorphicArguments(IRGenFunction &IGF,
                                 CanSILFunctionType origType,
-                                CanSILFunctionType substType,
                                 const SubstitutionMap &subs,
                                 WitnessMetadata *witnessMetadata,
                                 Explosion &args);
 
-  /// Bind the polymorphic paramater inside of a partial apply forwarding thunk.
+  /// Bind the polymorphic parameter inside of a partial apply forwarding thunk.
   void bindPolymorphicParameter(IRGenFunction &IGF,
                                 CanSILFunctionType &OrigFnType,
                                 CanSILFunctionType &SubstFnType,

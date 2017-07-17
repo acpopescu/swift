@@ -55,6 +55,12 @@ namespace constraints {
 typedef llvm::DenseMap<SubstitutableType *,
                        SmallVector<ProtocolConformance *, 2>> ConformanceMap;
 
+/// \brief Used for recursive lookups into an expr that is already
+/// being type-checked and the constraint system in which its type is
+/// stored.
+typedef std::pair<Expr *,
+                  constraints::ConstraintSystem *> ExprAndConstraintSystem;
+
 /// Special-case type checking semantics for certain declarations.
 enum class DeclTypeCheckingSemantics {
   /// A normal declaration.
@@ -741,6 +747,9 @@ private:
   llvm::DenseMap<AbstractFunctionDecl *, llvm::DenseSet<ApplyExpr *>>
     FunctionAsEscapingArg;
 
+  /// The # of times we have performed typo correction.
+  unsigned NumTypoCorrections = 0;
+
 public:
   /// Record an occurrence of a function that captures inout values as an
   /// argument.
@@ -816,7 +825,7 @@ private:
   llvm::DenseSet<CanType> CIntegerTypes;
 
   /// The set of expressions currently being analyzed for failures.
-  llvm::DenseMap<Expr*, Expr*> DiagnosedExprs;
+  llvm::DenseMap<Expr*, ExprAndConstraintSystem> DiagnosedExprs;
 
   ModuleDecl *StdlibModule = nullptr;
 
@@ -829,11 +838,15 @@ private:
   /// Intended for debugging purposes only.
   unsigned WarnLongFunctionBodies = 0;
 
-  /// If \p timeInMS is non-zero, warn when type-chcking an expression
-  /// takes longer than this many milliseconds.
+  /// If non-zero, warn when type-chcking an expression takes longer
+  /// than this many milliseconds.
   ///
   /// Intended for debugging purposes only.
   unsigned WarnLongExpressionTypeChecking = 0;
+
+  /// If non-zero, abort the expression type checker if it takes more
+  /// than this many seconds.
+  unsigned ExpressionTimeoutThreshold = 600;
 
   /// If true, the time it takes to type-check each function will be dumped
   /// to llvm::errs().
@@ -870,6 +883,10 @@ public:
     DebugTimeExpressions = true;
   }
 
+  bool getDebugTimeExpressions() {
+    return DebugTimeExpressions;
+  }
+
   /// If \p timeInMS is non-zero, warn when a function body takes longer than
   /// this many milliseconds to type-check.
   ///
@@ -878,12 +895,34 @@ public:
     WarnLongFunctionBodies = timeInMS;
   }
 
-  /// If \p timeInMS is non-zero, warn when type-chcking an expression
+  /// If \p timeInMS is non-zero, warn when type-checking an expression
   /// takes longer than this many milliseconds.
   ///
   /// Intended for debugging purposes only.
   void setWarnLongExpressionTypeChecking(unsigned timeInMS) {
     WarnLongExpressionTypeChecking = timeInMS;
+  }
+
+  /// Return the current setting for the number of milliseconds
+  /// threshold we use to determine whether to warn about an
+  /// expression taking a long time.
+  unsigned getWarnLongExpressionTypeChecking() {
+    return WarnLongExpressionTypeChecking;
+  }
+
+  /// Set the threshold that determines the upper bound for the number
+  /// of seconds we'll let the expression type checker run before
+  /// considering an expression "too complex".
+  void setExpressionTimeoutThreshold(unsigned timeInSeconds) {
+    ExpressionTimeoutThreshold = timeInSeconds;
+  }
+
+  /// Return the current settting for the threshold that determines
+  /// the upper bound for the number of seconds we'll let the
+  /// expression type checker run before considering an expression
+  /// "too complex".
+  unsigned getExpressionTimeoutThresholdInSeconds() {
+    return ExpressionTimeoutThreshold;
   }
 
   bool getInImmediateMode() {
@@ -1210,8 +1249,6 @@ public:
   void checkDeclAttributes(Decl *D);
   void checkTypeModifyingDeclAttributes(VarDecl *var);
 
-  void checkAutoClosureAttr(ParamDecl *D, AutoClosureAttr *attr);
-  void checkNoEscapeAttr(ParamDecl *D, NoEscapeAttr *attr);
   void checkOwnershipAttr(VarDecl *D, OwnershipAttr *attr);
 
   void computeAccessibility(ValueDecl *D);
@@ -1234,6 +1271,10 @@ public:
 
   virtual void resolveImplicitConstructors(NominalTypeDecl *nominal) override {
     addImplicitConstructors(nominal);
+  }
+
+  virtual void resolveImplicitMember(NominalTypeDecl *nominal, DeclName member) override {
+    synthesizeMemberForLookup(nominal, member);
   }
 
   virtual void
@@ -1410,6 +1451,11 @@ public:
   /// enum with a raw type.
   void addImplicitEnumConformances(EnumDecl *ED);
 
+  /// Synthesize the member with the given name on the target if applicable,
+  /// i.e. if the member is synthesizable and has not yet been added to the
+  /// target.
+  void synthesizeMemberForLookup(NominalTypeDecl *target, DeclName member);
+
   /// The specified AbstractStorageDecl \c storage was just found to satisfy
   /// the protocol property \c requirement.  Ensure that it has the full
   /// complement of accessors.
@@ -1447,8 +1493,15 @@ public:
                                      SubstitutionList SelfInterfaceSubs,
                                      SubstitutionList SelfContextSubs);
 
+  /// Pre-check the expression, validating any types that occur in the
+  /// expression and folding sequence expressions.
+  bool preCheckExpression(Expr *&expr, DeclContext *dc);
+
   /// Sets up and solves the constraint system \p cs to type check the given
   /// expression.
+  ///
+  /// The expression should have already been pre-checked with
+  /// preCheckExpression().
   ///
   /// \returns true if an error occurred, false otherwise.
   ///
@@ -1509,14 +1562,15 @@ public:
   /// otherwise
   ///
   /// \returns true if an error occurred, false otherwise.
-  bool typeCheckExpression(Expr *&expr, DeclContext *dc,
-                           TypeLoc convertType = TypeLoc(),
-                           ContextualTypePurpose convertTypePurpose =CTP_Unused,
-                           TypeCheckExprOptions options =TypeCheckExprOptions(),
-                           ExprTypeCheckListener *listener = nullptr,
-                           constraints::ConstraintSystem *baseCS = nullptr);
+  Type
+  typeCheckExpression(Expr *&expr, DeclContext *dc,
+                      TypeLoc convertType = TypeLoc(),
+                      ContextualTypePurpose convertTypePurpose = CTP_Unused,
+                      TypeCheckExprOptions options = TypeCheckExprOptions(),
+                      ExprTypeCheckListener *listener = nullptr,
+                      constraints::ConstraintSystem *baseCS = nullptr);
 
-  bool typeCheckExpression(Expr *&expr, DeclContext *dc,
+  Type typeCheckExpression(Expr *&expr, DeclContext *dc,
                            ExprTypeCheckListener *listener) {
     return typeCheckExpression(expr, dc, TypeLoc(), CTP_Unused,
                                TypeCheckExprOptions(), listener);
@@ -1545,6 +1599,12 @@ public:
       ConcreteDeclRef &referencedDecl,
       FreeTypeVariableBinding allowFreeTypeVariables =
                               FreeTypeVariableBinding::Disallow,
+      ExprTypeCheckListener *listener = nullptr);
+
+  void getPossibleTypesOfExpressionWithoutApplying(
+      Expr *&expr, DeclContext *dc, SmallVectorImpl<Type> &types,
+      FreeTypeVariableBinding allowFreeTypeVariables =
+          FreeTypeVariableBinding::Disallow,
       ExprTypeCheckListener *listener = nullptr);
 
   bool typeCheckCompletionSequence(Expr *&expr, DeclContext *DC);
@@ -2273,10 +2333,13 @@ public:
   void checkInitializerErrorHandling(Initializer *I, Expr *E);
   void checkEnumElementErrorHandling(EnumElementDecl *D);
 
-  void addExprForDiagnosis(Expr *E1, Expr *Result) {
+  void addExprForDiagnosis(Expr *E1, ExprAndConstraintSystem Result) {
     DiagnosedExprs[E1] = Result;
   }
-  Expr *isExprBeingDiagnosed(Expr *E) {
+  bool isExprBeingDiagnosed(Expr *E) {
+    return DiagnosedExprs.count(E);
+  }
+  ExprAndConstraintSystem getExprBeingDiagnosed(Expr *E) {
     return DiagnosedExprs[E];
   }
 
@@ -2329,6 +2392,7 @@ public:
                              SourceLoc lookupLoc,
                              NameLookupOptions lookupOptions,
                              LookupResult &result,
+                             GenericSignatureBuilder *gsb = nullptr,
                              unsigned maxResults = 4);
 
   void noteTypoCorrection(DeclName name, DeclNameLoc nameLoc,

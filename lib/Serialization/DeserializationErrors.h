@@ -17,8 +17,13 @@
 #include "swift/AST/Module.h"
 #include "swift/Serialization/ModuleFormat.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/PrettyStackTrace.h"
 
 namespace swift {
+class ModuleFile;
+
+StringRef getNameOfModule(const ModuleFile *);
+
 namespace serialization {
 
 class XRefTracePath {
@@ -145,7 +150,7 @@ class XRefTracePath {
 public:
   explicit XRefTracePath(ModuleDecl &M) : baseM(M) {}
 
-  void addValue(Identifier name) {
+  void addValue(DeclBaseName name) {
     path.push_back({ PathPiece::Kind::Value, name });
   }
 
@@ -310,6 +315,20 @@ public:
 
   std::error_code convertToErrorCode() const override {
     return llvm::inconvertibleErrorCode();
+  }
+};
+
+class PrettyStackTraceModuleFile : public llvm::PrettyStackTraceEntry {
+  const char *Action;
+  const ModuleFile &MF;
+public:
+  explicit PrettyStackTraceModuleFile(const char *action, ModuleFile &module)
+      : Action(action), MF(module) {}
+  explicit PrettyStackTraceModuleFile(ModuleFile &module)
+      : PrettyStackTraceModuleFile("While reading from", module) {}
+
+  void print(raw_ostream &os) const override {
+    os << Action << " \'" << getNameOfModule(&MF) << "'\n";
   }
 };
 

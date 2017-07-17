@@ -952,10 +952,13 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
             ? KeyPathExpr::Component::forSubscriptWithPrebuiltIndexExpr(
                 component.getDeclRef(),
                 newIndex,
+                component.getSubscriptLabels(),
                 component.getComponentType(),
                 component.getLoc())
-            : KeyPathExpr::Component::forUnresolvedSubscriptWithPrebuiltIndexExpr(
-                newIndex, component.getLoc());
+            : KeyPathExpr::Component
+                         ::forUnresolvedSubscriptWithPrebuiltIndexExpr(
+                E->getType()->getASTContext(),
+                newIndex, component.getSubscriptLabels(), component.getLoc());
         }
         break;
       }
@@ -1452,12 +1455,19 @@ Stmt *Traversal::visitSwitchStmt(SwitchStmt *S) {
   else
     return nullptr;
 
-  for (CaseStmt *aCase : S->getCases()) {
-    if (Stmt *aStmt = doIt(aCase)) {
-      assert(aCase == aStmt && "switch case remap not supported");
-      (void)aStmt;
-    } else
-      return nullptr;
+  for (auto N : S->getRawCases()) {
+    if (Stmt *aCase = N.dyn_cast<Stmt*>()) {
+      assert(isa<CaseStmt>(aCase));
+      if (Stmt *aStmt = doIt(aCase)) {
+        assert(aCase == aStmt && "switch case remap not supported");
+        (void)aStmt;
+      } else
+        return nullptr;
+    } else {
+      assert(isa<IfConfigDecl>(N.get<Decl*>()));
+      if (doIt(N.get<Decl*>()))
+        return nullptr;
+    }
   }
 
   return S;
@@ -1638,8 +1648,8 @@ bool Traversal::visitImplicitlyUnwrappedOptionalTypeRepr(ImplicitlyUnwrappedOpti
 }
 
 bool Traversal::visitTupleTypeRepr(TupleTypeRepr *T) {
-  for (auto elem : T->getElements()) {
-    if (doIt(elem))
+  for (auto &elem : T->getElements()) {
+    if (doIt(elem.Type))
       return true;
   }
   return false;

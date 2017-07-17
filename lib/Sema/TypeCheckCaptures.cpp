@@ -356,7 +356,7 @@ public:
       isNested = f->getDeclContext()->isLocalContext();
 
     if (isInOut && !AFR.isKnownNoEscape() && !isNested) {
-      if (D->getNameStr() == "self") {
+      if (D->getBaseName() == D->getASTContext().Id_self) {
         TC.diagnose(DRE->getLoc(),
           diag::closure_implicit_capture_mutating_self);
       } else {
@@ -456,9 +456,9 @@ public:
     // doesn't require its type metadata.
     if (auto declRef = dyn_cast<DeclRefExpr>(E))
       return (!declRef->getDecl()->isObjC()
-              && !E->getType()->getLValueOrInOutObjectType()
+              && !E->getType()->getWithoutSpecifierType()
                               ->hasRetainablePointerRepresentation()
-              && !E->getType()->getLValueOrInOutObjectType()
+              && !E->getType()->getWithoutSpecifierType()
                               ->is<AnyMetatypeType>());
 
     // Loading classes or metatypes doesn't require their metadata.

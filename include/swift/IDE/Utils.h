@@ -148,6 +148,7 @@ enum class SemaTokenKind {
   Invalid,
   ValueRef,
   ModuleRef,
+  ExprStart,
   StmtStart,
 };
 
@@ -164,6 +165,7 @@ struct SemaToken {
   DeclContext *DC = nullptr;
   Type ContainerType;
   Stmt *TrailingStmt = nullptr;
+  Expr *TrailingExpr = nullptr;
 
   SemaToken() = default;
   SemaToken(ValueDecl *ValueD, TypeDecl *CtorTyRef, ExtensionDecl *ExtTyRef,
@@ -175,6 +177,8 @@ struct SemaToken {
                                                Mod(Mod), Loc(Loc) { }
   SemaToken(Stmt *TrailingStmt) : Kind(SemaTokenKind::StmtStart),
                                   TrailingStmt(TrailingStmt) {}
+  SemaToken(Expr* TrailingExpr) : Kind(SemaTokenKind::ExprStart),
+                                  TrailingExpr(TrailingExpr) {}
   bool isValid() const { return !isInvalid(); }
   bool isInvalid() const { return Kind == SemaTokenKind::Invalid; }
 };
@@ -184,6 +188,7 @@ class SemaLocResolver : public SourceEntityWalker {
   SourceLoc LocToResolve;
   SemaToken SemaTok;
   Type ContainerType;
+  llvm::SmallVector<Expr*, 4> TrailingExprStack;
 
 public:
   explicit SemaLocResolver(SourceFile &SrcFile) : SrcFile(SrcFile) { }
@@ -191,6 +196,7 @@ public:
   SourceManager &getSourceMgr() const;
 private:
   bool walkToExprPre(Expr *E) override;
+  bool walkToExprPost(Expr *E) override;
   bool walkToDeclPre(Decl *D, CharSourceRange Range) override;
   bool walkToDeclPost(Decl *D) override;
   bool walkToStmtPre(Stmt *S) override;

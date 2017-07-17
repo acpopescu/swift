@@ -5,6 +5,7 @@ endif()
 
 add_swift_library(swiftSema STATIC
   CSApply.cpp
+  CSBindings.cpp
   CSDiag.cpp
   CSGen.cpp
   CSPropagate.cpp
@@ -56,6 +57,7 @@ add_swift_library(swiftSema STATIC
   LINK_LIBRARIES
     swiftParse
     swiftAST
+    swiftSerialization
   ${EXTRA_TYPECHECKER_FLAGS}
 )
 

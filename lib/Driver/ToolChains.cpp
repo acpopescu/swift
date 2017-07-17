@@ -129,6 +129,7 @@ static void addCommonFrontendArgs(const ToolChain &TC,
   inputArgs.AddLastArg(arguments,
                        options::OPT_warn_swift3_objc_inference_minimal,
                        options::OPT_warn_swift3_objc_inference_complete);
+  inputArgs.AddLastArg(arguments, options::OPT_typo_correction_limit);
   inputArgs.AddLastArg(arguments, options::OPT_enable_app_extension);
   inputArgs.AddLastArg(arguments, options::OPT_enable_testing);
   inputArgs.AddLastArg(arguments, options::OPT_g_Group);
@@ -231,6 +232,13 @@ ToolChain::constructInvocation(const CompileJobAction &job,
     case types::TY_TBD:
       FrontendModeOption = "-emit-tbd";
       break;
+
+    // BEGIN APPLE-ONLY OUTPUT TYPES
+    case types::TY_IndexData:
+      FrontendModeOption = "-typecheck";
+      break;
+    // END APPLE-ONLY OUTPUT TYPES
+
     case types::TY_Remapping:
       FrontendModeOption = "-update-code";
       break;
@@ -311,6 +319,12 @@ ToolChain::constructInvocation(const CompileJobAction &job,
     break;
   }
   case OutputInfo::Mode::SingleCompile: {
+    if (context.Output.getPrimaryOutputType() == types::TY_IndexData) {
+      if (Arg *A = context.Args.getLastArg(options::OPT_index_file_path)) {
+        Arguments.push_back("-primary-file");
+        Arguments.push_back(A->getValue());
+      }
+    }
     if (context.Args.hasArg(options::OPT_driver_use_filelists) ||
         context.InputActions.size() > TOO_MANY_FILES) {
       Arguments.push_back("-filelist");
@@ -456,6 +470,11 @@ ToolChain::constructInvocation(const CompileJobAction &job,
   if (context.Args.hasArg(options::OPT_embed_bitcode_marker))
     Arguments.push_back("-embed-bitcode-marker");
 
+  if (context.Args.hasArg(options::OPT_index_store_path)) {
+    context.Args.AddLastArg(Arguments, options::OPT_index_store_path);
+    Arguments.push_back("-index-system-modules");
+  }
+
   return II;
 }
 
@@ -541,6 +560,7 @@ ToolChain::constructInvocation(const BackendJobAction &job,
     case types::TY_SIL:
     case types::TY_SIB:
     case types::TY_PCH:
+    case types::TY_IndexData:
       llvm_unreachable("Cannot be output from backend job");
     case types::TY_Swift:
     case types::TY_dSYM:
@@ -824,6 +844,7 @@ ToolChain::constructInvocation(const GeneratePCHJobAction &job,
                         Arguments);
 
   addInputsOfType(Arguments, context.InputActions, types::TY_ObjCHeader);
+  context.Args.AddLastArg(Arguments, options::OPT_index_store_path);
 
   if (job.isPersistentPCH()) {
     Arguments.push_back("-emit-pch");
@@ -974,6 +995,15 @@ static void getClangLibraryPathOnDarwin(SmallVectorImpl<char> &libPath,
   llvm::sys::path::append(libPath, "clang", "lib", "darwin");
 }
 
+static void getClangLibraryPathOnLinux(SmallVectorImpl<char> &libPath,
+                                        const ArgList &args,
+                                        const ToolChain &TC) {
+  getRuntimeLibraryPath(libPath, args, TC);
+  // Remove platform name.
+  llvm::sys::path::remove_filename(libPath);
+  llvm::sys::path::append(libPath, "clang", "lib", "linux");
+}
+
 /// Get the runtime library link path for static linking,
 /// which is platform-specific and found relative to the compiler.
 static void getRuntimeStaticLibraryPath(SmallVectorImpl<char> &runtimeLibPath,
@@ -1041,12 +1071,27 @@ getSanitizerRuntimeLibNameForDarwin(StringRef Sanitizer, const llvm::Triple &Tri
       + getDarwinLibraryNameSuffixForTriple(Triple) + "_dynamic.dylib").str();
 }
 
+static std::string
+getSanitizerRuntimeLibNameForLinux(StringRef Sanitizer, const llvm::Triple &Triple) {
+  return (Twine("libclang_rt.") + Sanitizer + "-" +
+                       Triple.getArchName() + ".a").str();
+}
+
 bool toolchains::Darwin::sanitizerRuntimeLibExists(
     const ArgList &args, StringRef sanitizer) const {
   SmallString<128> sanitizerLibPath;
   getClangLibraryPathOnDarwin(sanitizerLibPath, args, *this);
   llvm::sys::path::append(sanitizerLibPath,
       getSanitizerRuntimeLibNameForDarwin(sanitizer, this->getTriple()));
+  return llvm::sys::fs::exists(sanitizerLibPath.str());
+}
+
+bool toolchains::GenericUnix::sanitizerRuntimeLibExists(
+    const ArgList &args, StringRef sanitizer) const {
+  SmallString<128> sanitizerLibPath;
+  getClangLibraryPathOnLinux(sanitizerLibPath, args, *this);
+  llvm::sys::path::append(sanitizerLibPath,
+      getSanitizerRuntimeLibNameForLinux(sanitizer, this->getTriple()));
   return llvm::sys::fs::exists(sanitizerLibPath.str());
 }
 
@@ -1082,6 +1127,20 @@ addLinkRuntimeLibForDarwin(const ArgList &Args, ArgStringList &Arguments,
 }
 
 static void
+addLinkRuntimeLibForLinux(const ArgList &Args, ArgStringList &Arguments,
+                           StringRef LinuxLibName,
+                           const ToolChain &TC) {
+  SmallString<128> Dir;
+  getRuntimeLibraryPath(Dir, Args, TC);
+  // Remove platform name.
+  llvm::sys::path::remove_filename(Dir);
+  llvm::sys::path::append(Dir, "clang", "lib", "linux");
+  SmallString<128> P(Dir);
+  llvm::sys::path::append(P, LinuxLibName);
+  Arguments.push_back(Args.MakeArgString(P));
+}
+
+static void
 addLinkSanitizerLibArgsForDarwin(const ArgList &Args,
                                  ArgStringList &Arguments,
                                  StringRef Sanitizer, const ToolChain &TC) {
@@ -1094,6 +1153,28 @@ addLinkSanitizerLibArgsForDarwin(const ArgList &Args,
   addLinkRuntimeLibForDarwin(Args, Arguments,
       getSanitizerRuntimeLibNameForDarwin(Sanitizer, TC.getTriple()),
       /*AddRPath=*/ true, TC);
+}
+
+static void
+addLinkSanitizerLibArgsForLinux(const ArgList &Args,
+                                 ArgStringList &Arguments,
+                                 StringRef Sanitizer, const ToolChain &TC) {
+
+     addLinkRuntimeLibForLinux(Args, Arguments,
+         getSanitizerRuntimeLibNameForLinux(Sanitizer, TC.getTriple()), TC);
+
+	//Code here from https://github.com/apple/swift-clang/blob/ab3cbe7/lib/Driver/Tools.cpp#L3264-L3276
+    // There's no libpthread or librt on RTEMS.
+    if (TC.getTriple().getOS() != llvm::Triple::RTEMS) {
+      Arguments.push_back("-lpthread");
+      Arguments.push_back("-lrt");
+    }
+    Arguments.push_back("-lm");
+    // There's no libdl on FreeBSD or RTEMS.
+    if (TC.getTriple().getOS() != llvm::Triple::FreeBSD &&
+        TC.getTriple().getOS() != llvm::Triple::RTEMS)
+      Arguments.push_back("-ldl");
+	
 }
 
 ToolChain::InvocationInfo
@@ -1267,6 +1348,10 @@ toolchains::Darwin::constructInvocation(const LinkJobAction &job,
     Arguments.push_back("-force_load_swift_libs");
   } else {
     Arguments.push_back(context.Args.MakeArgString(RuntimeLibPath));
+    // FIXME: We probably shouldn't be adding an rpath here unless we know ahead
+    // of time the standard library won't be copied. SR-1967
+    Arguments.push_back("-rpath");
+    Arguments.push_back(context.Args.MakeArgString(RuntimeLibPath));
   }
 
   if (context.Args.hasArg(options::OPT_profile_generate)) {
@@ -1304,11 +1389,6 @@ toolchains::Darwin::constructInvocation(const LinkJobAction &job,
 
     Arguments.push_back(context.Args.MakeArgString(LibProfile));
   }
-
-  // FIXME: We probably shouldn't be adding an rpath here unless we know ahead
-  // of time the standard library won't be copied.
-  Arguments.push_back("-rpath");
-  Arguments.push_back(context.Args.MakeArgString(RuntimeLibPath));
 
   // FIXME: Properly handle deployment targets.
   assert(Triple.isiOS() || Triple.isWatchOS() || Triple.isMacOSX());
@@ -1583,10 +1663,20 @@ toolchains::GenericUnix::constructInvocation(const LinkJobAction &job,
     Arguments.push_back(context.Args.MakeArgString(SharedRuntimeLibPath));
     Arguments.push_back("-lswiftCore");
   }
-
-
+  
   // Explicitly pass the target to the linker
   Arguments.push_back(context.Args.MakeArgString("--target=" + getTriple().str()));
+
+  if (getTriple().getOS() == llvm::Triple::Linux) {
+    //Make sure we only add SanitizerLibs for executables
+    if (job.getKind() == LinkKind::Executable) {
+      if (context.OI.SelectedSanitizer == SanitizerKind::Address) 
+        addLinkSanitizerLibArgsForLinux(context.Args, Arguments, "asan", *this);
+
+      if (context.OI.SelectedSanitizer == SanitizerKind::Thread) 
+        addLinkSanitizerLibArgsForLinux(context.Args, Arguments, "tsan", *this);
+    }
+  }
 
   if (context.Args.hasArg(options::OPT_profile_generate)) {
     SmallString<128> LibProfile(SharedRuntimeLibPath);
