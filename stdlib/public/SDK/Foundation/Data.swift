@@ -319,6 +319,7 @@ public final class _DataStorage {
     
     @inline(__always)
     public func append(_ bytes: UnsafeRawPointer, length: Int) {
+        precondition(length >= 0, "Length of appending bytes must be positive")
         switch _backing {
         case .swift:
             let origLength = _length
@@ -350,11 +351,11 @@ public final class _DataStorage {
     
     // fast-path for appending directly from another data storage
     @inline(__always)
-    public func append(_ otherData: _DataStorage, startingAt start: Int) {
+    public func append(_ otherData: _DataStorage, startingAt start: Int, endingAt end: Int) {
         let otherLength = otherData.length
         if otherLength == 0 { return }
         if let bytes = otherData.bytes {
-            append(bytes.advanced(by: start), length: otherLength)
+            append(bytes.advanced(by: start), length: end - start)
         }
     }
     
@@ -479,12 +480,12 @@ public final class _DataStorage {
             let data = d.mutableCopy() as! NSMutableData
             data.replaceBytes(in: range, withBytes: replacementBytes, length: replacementLength)
             _backing = .mutable(data)
-            _length = replacementLength
+            _length = data.length
             _bytes = data.mutableBytes
         case .mutable(let d):
             d.replaceBytes(in: range, withBytes: replacementBytes, length: replacementLength)
             _backing = .mutable(d)
-            _length = replacementLength
+            _length = d.length
             _bytes = d.mutableBytes
         case .customReference(let d):
             let data = d.mutableCopy() as! NSMutableData
@@ -1081,10 +1082,47 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
         
     }
     
+    // slightly faster paths for common sequences
+    
+    public init<S: Sequence>(_ elements: S) where S.Iterator.Element == UInt8 {
+        if elements is Array<UInt8> {
+            self.init(bytes: _identityCast(elements, to: Array<UInt8>.self))
+        } else if elements is ArraySlice<UInt8> {
+            self.init(bytes: _identityCast(elements, to: ArraySlice<UInt8>.self))
+        } else if elements is UnsafeBufferPointer<UInt8> {
+            self.init(buffer: _identityCast(elements, to: UnsafeBufferPointer<UInt8>.self))
+        } else if let buffer = elements as? UnsafeMutableBufferPointer<UInt8> {
+            self.init(buffer: buffer)
+        } else if let data = elements as? Data {
+            self.init(backing: data._backing.mutableCopy(data._sliceRange), range: 0..<data.count)
+        } else {
+            let underestimatedCount = elements.underestimatedCount
+            self.init(count: underestimatedCount)
+            
+            let (endIterator, _) = UnsafeMutableBufferPointer(start: _backing._bytes?.assumingMemoryBound(to: UInt8.self), count: underestimatedCount).initialize(from: elements)
+            var iter = endIterator
+            while let byte = iter.next() { self.append(byte) }
+        }
+    }
+
     @_versioned
     internal init(backing: _DataStorage, range: Range<Index>) {
         _backing = backing
         _sliceRange = range
+    }
+    
+    @_versioned
+    internal func _validateIndex(_ index: Int, message: String? = nil) {
+        precondition(_sliceRange.contains(index), message ?? "Index \(index) is out of bounds of range \(_sliceRange)")
+    }
+    
+    @_versioned
+    internal func _validateRange<R: RangeExpression>(_ range: R) where R.Bound == Int {
+        let lower = R.Bound(_sliceRange.lowerBound)
+        let upper = R.Bound(_sliceRange.upperBound)
+        let r = range.relative(to: lower..<upper)
+        precondition(r.lowerBound >= _sliceRange.lowerBound && r.lowerBound <= _sliceRange.upperBound, "Range \(r) is out of bounds of range \(_sliceRange)")
+        precondition(r.upperBound >= _sliceRange.lowerBound && r.upperBound <= _sliceRange.upperBound, "Range \(r) is out of bounds of range \(_sliceRange)")
     }
     
     // -----------------------------------
@@ -1099,6 +1137,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
         }
         @inline(__always)
         set {
+            precondition(count >= 0, "count must be positive")
             if !isKnownUniquelyReferenced(&_backing) {
                 _backing = _backing.mutableCopy(_sliceRange)
             }
@@ -1142,14 +1181,15 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     /// - warning: This method does not verify that the contents at pointer have enough space to hold `count` bytes.
     @inline(__always)
     public func copyBytes(to pointer: UnsafeMutablePointer<UInt8>, count: Int) {
+        precondition(count >= 0, "count of bytes to copy must be positive")
         if count == 0 { return }
-        memcpy(UnsafeMutableRawPointer(pointer), _backing.bytes!.advanced(by: _sliceRange.lowerBound), count)
+        memcpy(UnsafeMutableRawPointer(pointer), _backing.bytes!.advanced(by: _sliceRange.lowerBound), Swift.min(count, _sliceRange.count))
     }
     
     @inline(__always)
     private func _copyBytesHelper(to pointer: UnsafeMutableRawPointer, from range: NSRange) {
         if range.length == 0 { return }
-        memcpy(UnsafeMutableRawPointer(pointer), _backing.bytes!.advanced(by: range.location), range.length)
+        memcpy(UnsafeMutableRawPointer(pointer), _backing.bytes!.advanced(by: range.location), Swift.min(range.length, _sliceRange.count))
     }
     
     /// Copy a subset of the contents of the data to a pointer.
@@ -1175,16 +1215,11 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
         let copyRange : Range<Index>
         if let r = range {
             guard !r.isEmpty else { return 0 }
-            precondition(r.lowerBound >= 0)
-            precondition(r.lowerBound < cnt, "The range is outside the bounds of the data")
-            
-            precondition(r.upperBound >= 0)
-            precondition(r.upperBound <= cnt, "The range is outside the bounds of the data")
-            
             copyRange = r.lowerBound..<(r.lowerBound + Swift.min(buffer.count * MemoryLayout<DestinationType>.stride, r.count))
         } else {
             copyRange = 0..<Swift.min(buffer.count * MemoryLayout<DestinationType>.stride, cnt)
         }
+        _validateRange(copyRange)
         
         guard !copyRange.isEmpty else { return 0 }
         
@@ -1243,6 +1278,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     public func range(of dataToFind: Data, options: Data.SearchOptions = [], in range: Range<Index>? = nil) -> Range<Index>? {
         let nsRange : NSRange
         if let r = range {
+            _validateRange(r)
             nsRange = NSMakeRange(r.lowerBound, r.upperBound - r.lowerBound)
         } else {
             nsRange = NSMakeRange(0, _backing.length)
@@ -1266,6 +1302,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     
     @inline(__always)
     public mutating func append(_ bytes: UnsafePointer<UInt8>, count: Int) {
+        precondition(count >= 0, "count must be positive")
         if count == 0 { return }
         if !isKnownUniquelyReferenced(&_backing) {
             _backing = _backing.mutableCopy(_sliceRange)
@@ -1279,7 +1316,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
         if !isKnownUniquelyReferenced(&_backing) {
             _backing = _backing.mutableCopy(_sliceRange)
         }
-        _backing.append(other._backing, startingAt: other._sliceRange.lowerBound)
+        _backing.append(other._backing, startingAt: other._sliceRange.lowerBound, endingAt: other._sliceRange.upperBound)
         _sliceRange = _sliceRange.lowerBound..<(_sliceRange.upperBound + other.count)
     }
     
@@ -1326,6 +1363,9 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     /// - parameter range: The range in the data to set to `0`.
     @inline(__always)
     public mutating func resetBytes(in range: Range<Index>) {
+        // it is worth noting that the range here may be out of bounds of the Data itself (which triggers a growth)
+        precondition(range.lowerBound >= 0, "Ranges must be positive bounds")
+        precondition(range.upperBound >= 0, "Ranges must be positive bounds")
         let range = NSMakeRange(range.lowerBound, range.upperBound - range.lowerBound)
         if !isKnownUniquelyReferenced(&_backing) {
             _backing = _backing.mutableCopy(_sliceRange)
@@ -1346,6 +1386,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     /// - parameter data: The replacement data.
     @inline(__always)
     public mutating func replaceSubrange(_ subrange: Range<Index>, with data: Data) {
+        _validateRange(subrange)
         let nsRange = NSMakeRange(subrange.lowerBound, subrange.upperBound - subrange.lowerBound)
         let cnt = data.count
         if !isKnownUniquelyReferenced(&_backing) {
@@ -1361,6 +1402,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     
     @inline(__always)
     public mutating func replaceSubrange(_ subrange: CountableRange<Index>, with data: Data) {
+        _validateRange(subrange)
         let nsRange = NSMakeRange(subrange.lowerBound, subrange.upperBound - subrange.lowerBound)
         let cnt = data.count
         if !isKnownUniquelyReferenced(&_backing) {
@@ -1383,6 +1425,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     /// - parameter buffer: The replacement bytes.
     @inline(__always)
     public mutating func replaceSubrange<SourceType>(_ subrange: Range<Index>, with buffer: UnsafeBufferPointer<SourceType>) {
+        _validateRange(subrange)
         let nsRange = NSMakeRange(subrange.lowerBound, subrange.upperBound - subrange.lowerBound)
         let bufferCount = buffer.count * MemoryLayout<SourceType>.stride
         
@@ -1405,19 +1448,13 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     @inline(__always)
     public mutating func replaceSubrange<ByteCollection : Collection>(_ subrange: Range<Index>, with newElements: ByteCollection)
         where ByteCollection.Iterator.Element == Data.Iterator.Element {
-            
+            _validateRange(subrange)
             // Calculate this once, it may not be O(1)
             let replacementCount: Int = numericCast(newElements.count)
             let currentCount = self.count
             let subrangeCount = subrange.count
             
-            if currentCount < subrange.lowerBound + subrangeCount {
-                if subrangeCount == 0 {
-                    preconditionFailure("location \(subrange.lowerBound) exceeds data count \(currentCount)")
-                } else {
-                    preconditionFailure("range \(subrange) exceeds data count \(currentCount)")
-                }
-            }
+            _validateRange(subrange)
             
             let resultCount = currentCount - subrangeCount + replacementCount
             if resultCount != currentCount {
@@ -1446,6 +1483,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     
     @inline(__always)
     public mutating func replaceSubrange(_ subrange: Range<Index>, with bytes: UnsafeRawPointer, count cnt: Int) {
+        _validateRange(subrange)
         let nsRange = NSMakeRange(subrange.lowerBound, subrange.upperBound - subrange.lowerBound)
         if !isKnownUniquelyReferenced(&_backing) {
             _backing = _backing.mutableCopy(_sliceRange)
@@ -1461,11 +1499,11 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     /// - parameter range: The range to copy.
     @inline(__always)
     public func subdata(in range: Range<Index>) -> Data {
+        _validateRange(range)
         let length = count
         if count == 0 {
             return Data()
         }
-        precondition(length >= range.upperBound)
         return _backing.subdata(in: range)
     }
     
@@ -1502,6 +1540,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     
     @inline(__always)
     public func advanced(by amount: Int) -> Data {
+        _validateIndex(startIndex + amount)
         let length = count - amount
         precondition(length > 0)
         return withUnsafeBytes { (ptr: UnsafePointer<UInt8>) -> Data in
@@ -1518,10 +1557,12 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     public subscript(index: Index) -> UInt8 {
         @inline(__always)
         get {
+            _validateIndex(index)
             return _backing.bytes!.advanced(by: index).assumingMemoryBound(to: UInt8.self).pointee
         }
         @inline(__always)
         set {
+            _validateIndex(index)
             if !isKnownUniquelyReferenced(&_backing) {
                 _backing = _backing.mutableCopy(_sliceRange)
             }
@@ -1532,6 +1573,7 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
     public subscript(bounds: Range<Index>) -> Data {
         @inline(__always)
         get {
+            _validateRange(bounds)
             return Data(backing: _backing, range: bounds)
         }
         @inline(__always)
@@ -1544,19 +1586,27 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
         where R.Bound: FixedWidthInteger, R.Bound.Stride : SignedInteger {
         @inline(__always)
         get {
-            let range = rangeExpression.relative(to: 0..<R.Bound.max)
+            let lower = R.Bound(_sliceRange.lowerBound)
+            let upper = R.Bound(_sliceRange.upperBound)
+            let range = rangeExpression.relative(to: lower..<upper)
             let start: Int = numericCast(range.lowerBound)
             let end: Int = numericCast(range.upperBound)
-            return Data(backing: _backing, range: start..<end)
+            let r: Range<Int> = start..<end
+            _validateRange(r)
+            return Data(backing: _backing, range: r)
         }
         @inline(__always)
         set {
-            let range = rangeExpression.relative(to: 0..<R.Bound.max)
+            let lower = R.Bound(_sliceRange.lowerBound)
+            let upper = R.Bound(_sliceRange.upperBound)
+            let range = rangeExpression.relative(to: lower..<upper)
             let start: Int = numericCast(range.lowerBound)
             let end: Int = numericCast(range.upperBound)
-            replaceSubrange(start..<end, with: newValue)
+            let r: Range<Int> = start..<end
+            _validateRange(r)
+            replaceSubrange(r, with: newValue)
         }
-            
+        
     }
     
     /// The start `Index` in the data.
@@ -1594,11 +1644,24 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
         }
     }
     
+    public func _copyContents(initializing buffer: UnsafeMutableBufferPointer<UInt8>) -> (Iterator, UnsafeMutableBufferPointer<UInt8>.Index) {
+        guard !isEmpty else { return (makeIterator(), buffer.startIndex) }
+        guard let p = buffer.baseAddress else {
+            preconditionFailure("Attempt to copy contents into nil buffer pointer")
+        }
+        let cnt = count
+        precondition(cnt <= buffer.count, "Insufficient space allocated to copy Data contents")
+        
+        withUnsafeBytes { p.initialize(from: $0, count: cnt) }
+        
+        return (Iterator(endOf: self), buffer.index(buffer.startIndex, offsetBy: cnt))
+    }
+    
     /// An iterator over the contents of the data.
     ///
     /// The iterator will increment byte-by-byte.
     public func makeIterator() -> Data.Iterator {
-        return Iterator(_data: self)
+        return Iterator(self)
     }
     
     public struct Iterator : IteratorProtocol {
@@ -1611,11 +1674,18 @@ public struct Data : ReferenceConvertible, Equatable, Hashable, RandomAccessColl
         private var _idx: Data.Index
         private let _endIdx: Data.Index
         
-        fileprivate init(_data: Data) {
-            self._data = _data
+        fileprivate init(_ data: Data) {
+            _data = data
             _buffer = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
-            _idx = _data.startIndex
-            _endIdx = _data.endIndex
+            _idx = data.startIndex
+            _endIdx = data.endIndex
+        }
+        
+        fileprivate init(endOf data: Data) {
+            self._data = data
+            _buffer = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+            _idx = data.endIndex
+            _endIdx = data.endIndex
         }
         
         public mutating func next() -> UInt8? {
@@ -1758,11 +1828,27 @@ extension NSData : _HasCustomAnyHashableRepresentation {
 
 extension Data : Codable {
     public init(from decoder: Decoder) throws {
+        // FIXME: This is a hook for bypassing a conditional conformance implementation to apply a strategy (see SR-5206). Remove this once conditional conformance is available.
+        do {
+            let singleValueContainer = try decoder.singleValueContainer()
+            if let decoder = singleValueContainer as? _JSONDecoder {
+                switch decoder.options.dataDecodingStrategy {
+                case .deferredToData:
+                    break /* fall back to default implementation below; this would recurse */
+
+                default:
+                    // _JSONDecoder has a hook for Datas; this won't recurse since we're not going to defer back to Data in _JSONDecoder.
+                    self = try singleValueContainer.decode(Data.self)
+                    return
+                }
+            }
+        } catch { /* fall back to default implementation below */ }
+
         var container = try decoder.unkeyedContainer()
         
         // It's more efficient to pre-allocate the buffer if we can.
         if let count = container.count {
-            self.init(count: count)
+            self = Data(count: count)
             
             // Loop only until count, not while !container.isAtEnd, in case count is underestimated (this is misbehavior) and we haven't allocated enough space.
             // We don't want to write past the end of what we allocated.
@@ -1771,7 +1857,7 @@ extension Data : Codable {
                 self[i] = byte
             }
         } else {
-            self.init()
+            self = Data()
         }
         
         while !container.isAtEnd {
@@ -1781,6 +1867,21 @@ extension Data : Codable {
     }
     
     public func encode(to encoder: Encoder) throws {
+        // FIXME: This is a hook for bypassing a conditional conformance implementation to apply a strategy (see SR-5206). Remove this once conditional conformance is available.
+        // We are allowed to request this container as long as we don't encode anything through it when we need the unkeyed container below.
+        var singleValueContainer = encoder.singleValueContainer()
+        if let encoder = singleValueContainer as? _JSONEncoder {
+            switch encoder.options.dataEncodingStrategy {
+            case .deferredToData:
+                break /* fall back to default implementation below; this would recurse */
+
+            default:
+                // _JSONEncoder has a hook for Datas; this won't recurse since we're not going to defer back to Data in _JSONEncoder.
+                try singleValueContainer.encode(self)
+                return
+            }
+        }
+
         var container = encoder.unkeyedContainer()
         
         // Since enumerateBytes does not rethrow, we need to catch the error, stow it away, and rethrow if we stopped.
@@ -1799,3 +1900,4 @@ extension Data : Codable {
         }
     }
 }
+

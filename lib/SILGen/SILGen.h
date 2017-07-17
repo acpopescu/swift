@@ -106,7 +106,7 @@ public:
   
   /// If true, all functions and globals are made fragile. Currently only used
   /// for compiling the stdlib.
-  bool makeModuleFragile;
+  bool isMakeModuleFragile() const { return M.getOptions().SILSerializeAll; }
   
   Optional<SILDeclRef> StringToNSStringFn;
   Optional<SILDeclRef> NSStringToStringFn;
@@ -136,7 +136,7 @@ public:
   Optional<ProtocolConformance *> NSErrorConformanceToError;
 
 public:
-  SILGenModule(SILModule &M, ModuleDecl *SM, bool makeModuleFragile);
+  SILGenModule(SILModule &M, ModuleDecl *SM);
 
   ~SILGenModule();
   
@@ -264,7 +264,8 @@ public:
   void emitEnumConstructor(EnumElementDecl *decl);
 
   /// Emits the default argument generator with the given expression.
-  void emitDefaultArgGenerator(SILDeclRef constant, Expr *arg);
+  void emitDefaultArgGenerator(SILDeclRef constant, Expr *arg,
+                               DefaultArgumentKind kind);
 
   /// Emits the stored property initializer for the given pattern.
   void emitStoredPropertyInitialization(PatternBindingDecl *pd, unsigned i);

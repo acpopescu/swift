@@ -56,6 +56,8 @@ PASS(ABCOpt, "abcopts",
      "Array Bounds Check Optimization")
 PASS(AccessEnforcementSelection, "access-enforcement-selection",
      "Access Enforcement Selection")
+PASS(AccessSummaryDumper, "access-summary-dump",
+     "Dump Address Parameter Access Summary")
 PASS(InactiveAccessMarkerElimination, "inactive-access-marker-elim",
      "Inactive Access Marker Elimination.")
 PASS(FullAccessMarkerElimination, "full-access-marker-elim",
@@ -267,6 +269,8 @@ PASS(SemanticARCOpts, "semantic-arc-opts",
      "Semantic ARC Optimization")
 PASS(MarkUninitializedFixup, "mark-uninitialized-fixup",
      "Temporary pass for staging in mark_uninitialized changes.")
+PASS(SimplifyUnreachableContainingBlocks, "simplify-unreachable-containing-blocks",
+     "Utility pass. Removes all non-term insts from blocks with unreachable terms")
 PASS(BugReducerTester, "bug-reducer-tester",
      "sil-bug-reducer Tool Testing by Asserting on a Sentinel Function")
 PASS_RANGE(AllPasses, AADumper, BugReducerTester)

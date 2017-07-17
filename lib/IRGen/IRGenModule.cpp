@@ -44,6 +44,7 @@
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MD5.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include "GenEnum.h"
 #include "GenType.h"
@@ -127,9 +128,9 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
       ClangCodeGen(createClangCodeGenerator(Context, LLVMContext, irgen.Opts,
                                             ModuleName)),
       Module(*ClangCodeGen->GetModule()), LLVMContext(Module.getContext()),
-      DataLayout(target->createDataLayout()),
-      Triple(irgen.getEffectiveClangTriple()), TargetMachine(std::move(target)),
-      silConv(irgen.SIL), OutputFilename(OutputFilename),
+      DataLayout(target->createDataLayout()), Triple(Context.LangOpts.Target),
+      TargetMachine(std::move(target)), silConv(irgen.SIL),
+      OutputFilename(OutputFilename),
       TargetInfo(SwiftTargetInfo::get(*this)), DebugInfo(nullptr),
       ModuleHash(nullptr), ObjCInterop(Context.LangOpts.EnableObjCInterop),
       Types(*new TypeConverter(*this)) {
@@ -426,7 +427,7 @@ static bool isReturnAttribute(llvm::Attribute::AttrKind Attr) {
 
 llvm::Constant *swift::getRuntimeFn(llvm::Module &Module,
                       llvm::Constant *&cache,
-                      char const *name,
+                      const char *name,
                       llvm::CallingConv::ID cc,
                       llvm::ArrayRef<llvm::Type*> retTypes,
                       llvm::ArrayRef<llvm::Type*> argTypes,
@@ -813,9 +814,11 @@ llvm::AttributeSet IRGenModule::constructInitialAttributes() {
     attrsUpdated = attrsUpdated.addAttribute(LLVMContext,
                      llvm::AttributeSet::FunctionIndex, "target-cpu", CPU);
 
-  std::vector<std::string> &Features = ClangOpts.Features;
+  std::vector<std::string> Features = ClangOpts.Features;
   if (!Features.empty()) {
     SmallString<64> allFeatures;
+    // Sort so that the target features string is canonical.
+    std::sort(Features.begin(), Features.end());
     interleave(Features, [&](const std::string &s) {
       allFeatures.append(s);
     }, [&]{
@@ -1042,6 +1045,31 @@ void IRGenModule::emitAutolinkInfo() {
   }
 }
 
+void IRGenModule::emitEnableReportErrorsToDebugger() {
+  if (!Context.LangOpts.ReportErrorsToDebugger)
+    return;
+
+  if (!getSwiftModule()->hasEntryPoint())
+    return;
+
+  llvm::Function *NewFn = llvm::Function::Create(
+      llvm::FunctionType::get(VoidTy, false), llvm::GlobalValue::PrivateLinkage,
+      "_swift_enable_report_errors_to_debugger");
+  IRGenFunction NewIGF(*this, NewFn);
+  NewFn->setAttributes(constructInitialAttributes());
+  Module.getFunctionList().push_back(NewFn);
+  NewFn->setCallingConv(DefaultCC);
+
+  llvm::Value *addr =
+      Module.getOrInsertGlobal("_swift_reportFatalErrorsToDebugger", Int1Ty);
+  llvm::Value *one = llvm::ConstantInt::get(Int1Ty, 1);
+
+  NewIGF.Builder.CreateStore(one, addr, Alignment(1));
+  NewIGF.Builder.CreateRetVoid();
+
+  llvm::appendToGlobalCtors(Module, NewFn, 0, nullptr);
+}
+
 void IRGenModule::cleanupClangCodeGenMetadata() {
   // Remove llvm.ident that ClangCodeGen might have left in the module.
   auto *LLVMIdent = Module.getNamedMetadata("llvm.ident");
@@ -1110,6 +1138,7 @@ bool IRGenModule::finalize() {
     return false;
 
   emitAutolinkInfo();
+  emitEnableReportErrorsToDebugger();
   emitGlobalLists();
   if (DebugInfo)
     DebugInfo->finalize();
@@ -1182,11 +1211,4 @@ IRGenModule *IRGenerator::getGenModule(SILFunction *f) {
     return IGM;
 
   return getPrimaryIGM();
-}
-
-llvm::Triple IRGenerator::getEffectiveClangTriple() {
-  auto CI = static_cast<ClangImporter *>(
-      &*SIL.getASTContext().getClangModuleLoader());
-  assert(CI && "no clang module loader");
-  return llvm::Triple(CI->getTargetInfo().getTargetOpts().Triple);
 }

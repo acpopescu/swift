@@ -13,6 +13,10 @@
 import Foundation
 @_exported import UIKit
 
+#if os(iOS) || os(tvOS)
+import _SwiftUIKitOverlayShims
+#endif
+
 //===----------------------------------------------------------------------===//
 // UIGeometry
 //===----------------------------------------------------------------------===//
@@ -212,7 +216,7 @@ extension UIView : _DefaultCustomPlaygroundQuickLookable {
 #endif
 
 extension UIColor : _ExpressibleByColorLiteral {
-  @nonobjc public required convenience init(colorLiteralRed red: Float,
+  @nonobjc public required convenience init(_colorLiteralRed red: Float,
                                             green: Float,
                                             blue: Float, alpha: Float) {
     self.init(red: CGFloat(red), green: CGFloat(green),
@@ -277,13 +281,15 @@ extension UIContentSizeCategory {
 #if os(iOS) || os(tvOS)
 @available(iOS 11.0, tvOS 11.0, *)
 extension UIFocusEnvironment {
+  @available(iOS 11.0, tvOS 11.0, *)
   public func contains(_ environment: UIFocusEnvironment) -> Bool {
-    return UIFocusSystem.environment(self, contains: environment)
+    return _swift_UIKit_UIFocusEnvironmentContainsEnvironment(self, environment)
   }
 }
 
 @available(iOS 11.0, tvOS 11.0, *)
 extension UIFocusItem {
+  @available(iOS 11.0, tvOS 11.0, *)
   public var isFocused: Bool {
     return self === UIScreen.main.focusedItem
   }

@@ -46,6 +46,7 @@
 #include "clang/CodeGen/ObjectFilePCHContainerOperations.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Frontend/Utils.h"
+#include "clang/Index/IndexingAction.h"
 #include "clang/Serialization/ASTReader.h"
 #include "clang/Serialization/ASTWriter.h"
 #include "clang/Lex/Preprocessor.h"
@@ -563,24 +564,6 @@ getNormalInvocationArguments(std::vector<std::string> &invocationArgStrs,
     }
   }
 
-  if (triple.isOSDarwin()) {
-    std::string minVersionBuf;
-    llvm::raw_string_ostream minVersionOpt{minVersionBuf};
-    minVersionOpt << getMinVersionOptNameForDarwinTriple(triple);
-
-    unsigned major, minor, micro;
-    if (triple.isiOS()) {
-      triple.getiOSVersion(major, minor, micro);
-    } else if (triple.isWatchOS()) {
-      triple.getWatchOSVersion(major, minor, micro);
-    } else {
-      assert(triple.isMacOSX());
-      triple.getMacOSXVersion(major, minor, micro);
-    }
-    minVersionOpt << clang::VersionTuple(major, minor, micro);
-    invocationArgStrs.push_back(std::move(minVersionOpt.str()));
-  }
-
   if (searchPathOpts.SDKPath.empty()) {
     invocationArgStrs.push_back("-Xclang");
     invocationArgStrs.push_back("-nostdsysteminc");
@@ -620,6 +603,23 @@ getNormalInvocationArguments(std::vector<std::string> &invocationArgStrs,
       "-Xclang", "-fmodule-format=obj",
     });
   }
+
+  // Enable API notes alongside headers/in frameworks.
+  invocationArgStrs.push_back("-fapinotes-modules");
+
+  // Add API notes paths.
+  for (const auto &searchPath : searchPathOpts.ImportSearchPaths) {
+    invocationArgStrs.push_back("-iapinotes-modules");
+    invocationArgStrs.push_back(searchPath);
+  }
+  invocationArgStrs.push_back("-iapinotes-modules");
+  invocationArgStrs.push_back(searchPathOpts.RuntimeLibraryImportPath);
+
+  // Map the Swift major version into the API notes version for Swift. This
+  // has the effect of allowing API notes to effect changes only on Swift
+  // major versions, not minor versions.
+  invocationArgStrs.push_back("-fapinotes-swift-version=" +
+                              llvm::itostr(languageVersion[0]));
 }
 
 static void
@@ -648,6 +648,24 @@ addCommonInvocationArguments(std::vector<std::string> &invocationArgStrs,
   invocationArgStrs.push_back("-target");
   invocationArgStrs.push_back(triple.str());
 
+  if (triple.isOSDarwin()) {
+    std::string minVersionBuf;
+    llvm::raw_string_ostream minVersionOpt{minVersionBuf};
+    minVersionOpt << getMinVersionOptNameForDarwinTriple(triple);
+
+    unsigned major, minor, micro;
+    if (triple.isiOS()) {
+      triple.getiOSVersion(major, minor, micro);
+    } else if (triple.isWatchOS()) {
+      triple.getWatchOSVersion(major, minor, micro);
+    } else {
+      assert(triple.isMacOSX());
+      triple.getMacOSXVersion(major, minor, micro);
+    }
+    minVersionOpt << clang::VersionTuple(major, minor, micro);
+    invocationArgStrs.push_back(std::move(minVersionOpt.str()));
+  }
+
   invocationArgStrs.push_back(ImporterImpl::moduleImportBufferName);
 
   if (ctx.LangOpts.EnableAppExtensionRestrictions) {
@@ -664,6 +682,8 @@ addCommonInvocationArguments(std::vector<std::string> &invocationArgStrs,
         triple.getArch() == llvm::Triple::aarch64_be) {
       invocationArgStrs.push_back("-mcpu=cyclone");
     }
+  } else if (triple.getArch() == llvm::Triple::systemz) {
+    invocationArgStrs.push_back("-march=z196");
   }
 
   const std::string &overrideResourceDir = importerOpts.OverrideResourceDir;
@@ -688,26 +708,14 @@ addCommonInvocationArguments(std::vector<std::string> &invocationArgStrs,
     invocationArgStrs.push_back(overrideResourceDir);
   }
 
+  if (!importerOpts.IndexStorePath.empty()) {
+    invocationArgStrs.push_back("-index-store-path");
+    invocationArgStrs.push_back(importerOpts.IndexStorePath);
+  }
+
   for (auto extraArg : importerOpts.ExtraArgs) {
     invocationArgStrs.push_back(extraArg);
   }
-
-  // Enable API notes alongside headers/in frameworks.
-  invocationArgStrs.push_back("-fapinotes-modules");
-
-  // Add API notes paths.
-  for (const auto &searchPath : searchPathOpts.ImportSearchPaths) {
-    invocationArgStrs.push_back("-iapinotes-modules");
-    invocationArgStrs.push_back(searchPath);
-  }
-  invocationArgStrs.push_back("-iapinotes-modules");
-  invocationArgStrs.push_back(searchPathOpts.RuntimeLibraryImportPath);
-
-  // Map the Swift major version into the API notes version for Swift. This
-  // has the effect of allowing API notes to effect changes only on Swift
-  // major versions, not minor versions.
-  invocationArgStrs.push_back("-fapinotes-swift-version=" +
-    llvm::itostr(ctx.LangOpts.EffectiveLanguageVersion[0]));
 }
 
 bool ClangImporter::canReadPCH(StringRef PCHFilename) {
@@ -1306,6 +1314,7 @@ ClangImporter::emitBridgingPCH(StringRef headerPath,
   invocation->getFrontendOpts().Inputs.push_back(
       clang::FrontendInputFile(headerPath, clang::IK_ObjC));
   invocation->getFrontendOpts().OutputFile = outputPCHPath;
+  invocation->getFrontendOpts().ProgramAction = clang::frontend::GeneratePCH;
   invocation->getPreprocessorOpts().resetNonModularOptions();
 
   clang::CompilerInstance emitInstance(
@@ -1319,8 +1328,15 @@ ClangImporter::emitBridgingPCH(StringRef headerPath,
   emitInstance.createSourceManager(fileManager);
   emitInstance.setTarget(&Impl.Instance->getTarget());
 
-  clang::GeneratePCHAction action;
-  emitInstance.ExecuteAction(action);
+  std::unique_ptr<clang::FrontendAction> action;
+  action.reset(new clang::GeneratePCHAction());
+  if (!emitInstance.getFrontendOpts().IndexStorePath.empty()) {
+    action = clang::index::
+      createIndexDataRecordingAction(emitInstance.getFrontendOpts(),
+                                     std::move(action));
+  }
+  emitInstance.ExecuteAction(*action);
+
   if (emitInstance.getDiagnostics().hasErrorOccurred()) {
     Impl.SwiftContext.Diags.diagnose({},
                                      diag::bridging_header_pch_error,
@@ -1407,6 +1423,17 @@ ModuleDecl *ClangImporter::loadModule(
     auto importRAII = diagClient.handleImport(clangPath.front().first,
                                               importLoc);
 
+    std::string preservedIndexStorePathOption;
+    auto &clangFEOpts = Impl.Instance->getFrontendOpts();
+    if (!clangFEOpts.IndexStorePath.empty()) {
+      StringRef moduleName = path[0].first->getName();
+      // Ignore the SwiftShims module for the index data.
+      if (moduleName == Impl.SwiftContext.SwiftShimsModuleName.str()) {
+        preservedIndexStorePathOption = clangFEOpts.IndexStorePath;
+        clangFEOpts.IndexStorePath.clear();
+      }
+    }
+
     // FIXME: The source location here is completely bogus. It can't be
     // invalid, it can't be the same thing twice in a row, and it has to come
     // from an actual buffer, so we make a fake buffer and just use a counter.
@@ -1427,6 +1454,12 @@ ModuleDecl *ClangImporter::loadModule(
     clang::ModuleLoadResult result =
         Impl.Instance->loadModule(clangImportLoc, path, visibility,
                                   /*IsInclusionDirective=*/false);
+
+    if (!preservedIndexStorePathOption.empty()) {
+      // Restore the -index-store-path option.
+      clangFEOpts.IndexStorePath = preservedIndexStorePathOption;
+    }
+
     if (result && makeVisible)
       Impl.getClangPreprocessor().makeModuleVisible(result, clangImportLoc);
     return result;
@@ -2272,7 +2305,14 @@ void ClangModuleUnit::getTopLevelDecls(SmallVectorImpl<Decl*> &results) const {
           owner.importDecl(decl, owner.CurrentVersion);
       if (!importedDecl) continue;
 
-      auto ext = dyn_cast<ExtensionDecl>(importedDecl->getDeclContext());
+      // Find the enclosing extension, if there is one.
+      ExtensionDecl *ext = nullptr;
+      for (auto importedDC = importedDecl->getDeclContext();
+           !importedDC->isModuleContext();
+           importedDC = importedDC->getParent()) {
+        ext = dyn_cast<ExtensionDecl>(importedDC);
+        if (ext) break;
+      }
       if (!ext) continue;
 
       if (knownExtensions.insert(ext).second)

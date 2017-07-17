@@ -267,6 +267,17 @@ ERROR(incorrect_explicit_closure_result,none,
       "declared closure result %0 is incompatible with contextual type %1",
       (Type, Type))
 
+ERROR(err_noescape_param_call,none,
+      "passing a %select{|closure which captures a }1non-escaping function "
+      "parameter %0 to a call to a non-escaping function parameter can allow "
+      "re-entrant modification of a variable",
+      (DeclName, unsigned))
+WARNING(warn_noescape_param_call,none,
+      "passing a %select{|closure which captures a }1non-escaping function "
+      "parameter %0 to a call to a non-escaping function parameter can allow "
+      "re-entrant modification of a variable and will be illegal in Swift 4",
+      (DeclName, unsigned))
+
 ERROR(cannot_call_function_value,none,
       "cannot invoke value of function type with argument list '%0'",
       (StringRef))
@@ -899,6 +910,10 @@ ERROR(member_shadows_global_function,none,
       "use of %0 refers to %1 %2 rather than %3 %4 in %5 %6",
       (DeclName, DescriptiveDeclKind, DeclName, DescriptiveDeclKind, DeclName,
        DescriptiveDeclKind, DeclName))
+ERROR(member_shadows_global_function_near_match,none,
+      "use of %0 nearly matches %3 %4 in %5 %6 rather than %1 %2",
+      (DeclName, DescriptiveDeclKind, DeclName, DescriptiveDeclKind, DeclName,
+      DescriptiveDeclKind, DeclName))
 
 ERROR(instance_member_use_on_type,none,
       "instance member %1 cannot be used on type %0; "
@@ -1337,9 +1352,6 @@ ERROR(extension_constrained_inheritance,none,
       "inheritance clause", (Type))
 ERROR(extension_protocol_inheritance,none,
       "extension of protocol %0 cannot have an inheritance clause", (Type))
-ERROR(extension_protocol_via_typealias,none,
-      "protocol %0 in the module being compiled cannot be extended via a "
-      "type alias", (Type))
 ERROR(objc_generic_extension_using_type_parameter,none,
       "extension of a generic Objective-C class cannot access the class's "
       "generic parameters at runtime", ())
@@ -1587,7 +1599,10 @@ NOTE(declared_protocol_conformance_here,none,
      "%0 implicitly conforms to protocol %2}1 here",
      (Type, unsigned, DeclName, DeclName))
 
-WARNING(witness_unavailable,none,
+WARNING(witness_unavailable_warn,none,
+        "unavailable %0 %1 was used to satisfy a requirement of protocol %2",
+        (DescriptiveDeclKind, DeclName, DeclName))
+ERROR(witness_unavailable,none,
         "unavailable %0 %1 was used to satisfy a requirement of protocol %2",
         (DescriptiveDeclKind, DeclName, DeclName))
 
@@ -1673,9 +1688,6 @@ ERROR(requires_generic_param_same_type_does_not_conform,none,
       (Type, Identifier))
 ERROR(requires_same_concrete_type,none,
       "generic signature requires types %0 and %1 to be the same", (Type, Type))
-ERROR(protocol_typealias_conflict, none,
-      "type alias %0 requires types %1 and %2 to be the same",
-      (Identifier, Type, Type))
 WARNING(redundant_conformance_constraint,none,
         "redundant conformance constraint %0: %1", (Type, ProtocolDecl *))
 NOTE(redundant_conformance_here,none,
@@ -1683,6 +1695,9 @@ NOTE(redundant_conformance_here,none,
      "inferred from type here}0",
      (unsigned, Type, ProtocolDecl *))
 
+ERROR(same_type_conflict,none,
+      "%select{generic parameter |protocol |}0%1 cannot be equal to both "
+      "%2 and %3", (unsigned, Type, Type, Type))
 WARNING(redundant_same_type_to_concrete,none,
         "redundant same-type constraint %0 == %1", (Type, Type))
 NOTE(same_type_redundancy_here,none,
@@ -1723,6 +1738,9 @@ WARNING(inherited_associated_type_redecl,none,
 WARNING(typealias_override_associated_type,none,
         "typealias overriding associated type %0 from protocol %1 is better "
         "expressed as same-type constraint on the protocol", (DeclName, Type))
+WARNING(associated_type_override_typealias,none,
+        "associated type %0 is redundant with type %0 declared in inherited "
+        "%1 %2", (DeclName, DescriptiveDeclKind, Type))
 
 ERROR(generic_param_access,none,
       "%0 %select{must be declared %select{"
@@ -2051,7 +2069,7 @@ ERROR(broken_decodable_requirement,none,
       "Decodable protocol is broken: unexpected requirement", ())
 
 NOTE(codable_extraneous_codingkey_case_here,none,
-     "CodingKey case %0 does match any stored properties", (Identifier))
+     "CodingKey case %0 does not match any stored properties", (Identifier))
 NOTE(codable_non_conforming_property_here,none,
      "cannot automatically synthesize %0 because %1 does not conform to %0", (Type, Type))
 NOTE(codable_non_decoded_property_here,none,
@@ -2895,7 +2913,11 @@ ERROR(single_tuple_parameter_mismatch,none,
 ERROR(unknown_single_tuple_parameter_mismatch,none,
       "single parameter of type %0 is expected in call", (Type))
 
-
+ERROR(enum_element_pattern_assoc_values_mismatch,none,
+      "pattern with associated values does not match enum case %0",
+      (Identifier))
+NOTE(enum_element_pattern_assoc_values_remove,none,
+     "remove associated values to make the pattern match", ())
 ERROR(tuple_pattern_length_mismatch,none,
       "tuple pattern has the wrong length for tuple type %0", (Type))
 ERROR(tuple_pattern_label_mismatch,none,
@@ -3283,6 +3305,8 @@ ERROR(objc_invalid_on_func_curried,none,
       "cannot be represented in Objective-C", (unsigned))
 ERROR(objc_observing_accessor, none,
       "observing accessors are not allowed to be marked @objc", ())
+ERROR(objc_addressor, none,
+      "addressors are not allowed to be marked @objc", ())
 ERROR(objc_invalid_on_func_variadic,none,
       "method cannot be %" OBJC_ATTR_SELECT "0 because it has a variadic "
       "parameter", (unsigned))
@@ -3601,6 +3625,9 @@ ERROR(resilience_decl_unavailable,
 #undef FRAGILE_FUNC_KIND
 
 NOTE(resilience_decl_declared_here,
+     none, "%0 %1 is not public", (DescriptiveDeclKind, DeclName))
+
+NOTE(resilience_decl_declared_here_versioned,
      none, "%0 %1 is not '@_versioned' or public", (DescriptiveDeclKind, DeclName))
 
 ERROR(designated_init_in_extension_resilient,none,

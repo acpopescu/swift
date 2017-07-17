@@ -1396,8 +1396,17 @@ recur:
             goto recur;
           }
 
-          diagnose(EEP->getLoc(), diag::enum_element_pattern_member_not_found,
-                   EEP->getName().str(), type);
+          auto diag = diagnose(EEP->getLoc(),
+                               diag::enum_element_pattern_member_not_found,
+                               EEP->getName().str(), type);
+
+          // If we have an optional type let's try to see if the case
+          // exists in its base type, if so we can suggest a fix-it for that.
+          if (auto baseType = type->getOptionalObjectType()) {
+            if (lookupEnumMemberElement(*this, dc, baseType, EEP->getName(),
+                                        EEP->getLoc()))
+              diag.fixItInsertAfter(EEP->getEndLoc(), "?");
+          }
         }
         return true;
       }
@@ -1450,16 +1459,25 @@ recur:
 
     // If there is a subpattern, push the enum element type down onto it.
     if (EEP->hasSubPattern()) {
+      Pattern *sub = EEP->getSubPattern();
+      if (!Context.isSwiftVersion3() && !elt->hasAssociatedValues()) {
+        diagnose(EEP->getLoc(),
+                 diag::enum_element_pattern_assoc_values_mismatch,
+                 EEP->getName());
+        diagnose(EEP->getLoc(), diag::enum_element_pattern_assoc_values_remove)
+          .fixItRemove(sub->getSourceRange());
+        return true;
+      }
+      
       Type elementType;
       if (auto argType = elt->getArgumentInterfaceType())
         elementType = enumTy->getTypeOfMember(elt->getModuleContext(),
                                               elt, argType);
       else
         elementType = TupleType::getEmpty(Context);
-      Pattern *sub = EEP->getSubPattern();
       if (coercePatternToType(sub, dc, elementType,
-                     subOptions|TR_FromNonInferredPattern|TR_EnumPatternPayload,
-                     resolver))
+                              subOptions|TR_FromNonInferredPattern|TR_EnumPatternPayload,
+                              resolver))
         return true;
       EEP->setSubPattern(sub);
     } else if (auto argType = elt->getArgumentInterfaceType()) {

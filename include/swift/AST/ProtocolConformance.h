@@ -234,10 +234,6 @@ public:
   /// is either the default definition or was otherwise deduced.
   bool usesDefaultDefinition(AssociatedTypeDecl *requirement) const;
 
-  /// Returns true if this conformance has a layout that is known to all
-  /// consumers, based on the type/protocol involved in it.
-  bool hasFixedLayout() const;
-
   // Make vanilla new/delete illegal for protocol conformances.
   void *operator new(size_t bytes) = delete;
   void operator delete(void *data) SWIFT_DELETE_OPERATOR_DELETED;
@@ -396,7 +392,7 @@ public:
   AbstractStorageDecl *getBehaviorDecl() const {
     return ContextAndInvalid.getPointer().dyn_cast<AbstractStorageDecl *>();
   }
-  
+
   /// Retrieve the type witness and type decl (if one exists)
   /// for the given associated type.
   std::pair<Type, TypeDecl *>
@@ -466,6 +462,8 @@ public:
   /// protocol, which line up with the conformance constraints in the
   /// protocol's requirement signature.
   ArrayRef<ProtocolConformanceRef> getSignatureConformances() const {
+    if (Resolver)
+      resolveLazyInfo();
     return SignatureConformances;
   }
 

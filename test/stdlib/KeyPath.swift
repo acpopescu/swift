@@ -1,4 +1,4 @@
-// RUN: rm -rf %t && mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-build-swift %s -Xfrontend -enable-experimental-keypath-components -o %t/a.out
 // RUN: %target-run %t/a.out
 // REQUIRES: executable_test
@@ -11,6 +11,15 @@ final class C<T> {
   var x: Int
   var y: LifetimeTracked?
   var z: T
+
+  var computed: T {
+    get {
+      return z
+    }
+    set {
+      z = newValue
+    }
+  }
 
   init(x: Int, y: LifetimeTracked?, z: T) {
     self.x = x
@@ -344,6 +353,174 @@ keyPath.test("dynamically-typed application") {
                   protoErasedSubject[keyPath: protoErasedPathC])
     expectTrue(protoErasedSubject.c === newC)
   }
+}
+
+struct TestOptional {
+  var origin: Point?
+  var questionableCanary: LifetimeTracked? = LifetimeTracked(123)
+
+  init(origin: Point?) {
+    self.origin = origin
+  }
+}
+
+keyPath.test("optional force-unwrapping") {
+  let origin_x = \TestOptional.origin!.x
+  let canary = \TestOptional.questionableCanary!
+
+  var value = TestOptional(origin: Point(x: 3, y: 4))
+
+  expectEqual(value[keyPath: origin_x], 3)
+  expectEqual(value.origin!.x, 3)
+
+  value[keyPath: origin_x] = 5
+
+  expectEqual(value[keyPath: origin_x], 5)
+  expectEqual(value.origin!.x, 5)
+
+  expectTrue(value[keyPath: canary] === value.questionableCanary)
+  let newCanary = LifetimeTracked(456)
+  value[keyPath: canary] = newCanary
+  expectTrue(value[keyPath: canary] === newCanary)
+  expectTrue(value.questionableCanary === newCanary)
+}
+
+keyPath.test("optional force-unwrapping trap") {
+  let origin_x = \TestOptional.origin!.x
+  var value = TestOptional(origin: nil)
+
+  expectCrashLater()
+  _ = value[keyPath: origin_x]
+}
+
+struct TestOptional2 {
+  var optional: TestOptional?
+}
+
+keyPath.test("optional chaining") {
+  let origin_x = \TestOptional.origin?.x
+  let canary = \TestOptional.questionableCanary?.value
+  
+  let withPoint = TestOptional(origin: Point(x: 3, y: 4))
+  expectEqual(withPoint[keyPath: origin_x]!, 3)
+  expectEqual(withPoint[keyPath: canary]!, 123)
+
+  let withoutPoint = TestOptional(origin: nil)
+  expectNil(withoutPoint[keyPath: origin_x])
+
+  let optional2: TestOptional2? = TestOptional2(optional: withPoint)
+  let optional2_optional = \TestOptional2?.?.optional
+  expectEqual(optional2[keyPath: optional2_optional]!.origin!.x, 3)
+  expectEqual(optional2[keyPath: optional2_optional]!.origin!.y, 4)
+}
+
+func makeKeyPathInGenericContext<T>(of: T.Type)
+    -> ReferenceWritableKeyPath<C<T>, T> {
+  return \C<T>.computed
+}
+
+keyPath.test("computed generic key paths") {
+  let path = makeKeyPathInGenericContext(of: LifetimeTracked.self)
+  let z = LifetimeTracked(456)
+  let c = C(x: 42, y: LifetimeTracked(123), z: z)
+
+  expectTrue(c[keyPath: path] === z)
+
+  let z2 = LifetimeTracked(789)
+  c[keyPath: path] = z2
+  expectTrue(c[keyPath: path] === z2)
+  expectTrue(c.z === z2)
+
+  let path2 = makeKeyPathInGenericContext(of: LifetimeTracked.self)
+
+  expectEqual(path, path2)
+  expectEqual(path.hashValue, path2.hashValue)
+
+  let pathNonGeneric = \C<LifetimeTracked>.computed
+  expectEqual(path, pathNonGeneric)
+  expectEqual(path.hashValue, pathNonGeneric.hashValue)
+
+  let valuePath = path.appending(path: \LifetimeTracked.value)
+
+  expectEqual(c[keyPath: valuePath], 789)
+
+  let valuePathNonGeneric = pathNonGeneric.appending(path: \LifetimeTracked.value)
+  expectEqual(valuePath, valuePathNonGeneric)
+  expectEqual(valuePath.hashValue, valuePathNonGeneric.hashValue)
+}
+
+var numberOfMutatingWritebacks = 0
+var numberOfNonmutatingWritebacks = 0
+
+struct NoisyWriteback {
+  var canary = LifetimeTracked(246)
+
+  var mutating: LifetimeTracked {
+    get { return canary }
+    set { numberOfMutatingWritebacks += 1 }
+  }
+
+  var nonmutating: LifetimeTracked {
+    get { return canary }
+    nonmutating set { numberOfNonmutatingWritebacks += 1 }
+  }
+}
+
+keyPath.test("read-only accesses don't trigger writebacks") {
+  var x = NoisyWriteback()
+  x = NoisyWriteback() // suppress "never mutated" warnings
+
+  let wkp = \NoisyWriteback.mutating
+  let rkp = \NoisyWriteback.nonmutating
+
+  numberOfMutatingWritebacks = 0
+  numberOfNonmutatingWritebacks = 0
+  _ = x[keyPath: wkp]
+  _ = x[keyPath: rkp]
+
+  expectEqual(x[keyPath: wkp].value, 246)
+  expectEqual(x[keyPath: rkp].value, 246)
+
+  expectEqual(numberOfMutatingWritebacks, 0)
+  expectEqual(numberOfNonmutatingWritebacks, 0)
+
+  let y = x
+  _ = y[keyPath: wkp]
+  _ = y[keyPath: rkp]
+
+  expectEqual(y[keyPath: wkp].value, 246)
+  expectEqual(y[keyPath: rkp].value, 246)
+
+  expectEqual(numberOfMutatingWritebacks, 0)
+  expectEqual(numberOfNonmutatingWritebacks, 0)
+}
+
+var nestedWritebackLog = 0
+
+struct NoisyNestingWriteback {
+  var value: Int
+
+  var nested: NoisyNestingWriteback {
+    get {
+      return NoisyNestingWriteback(value: value + 1)
+    }
+    set {
+      nestedWritebackLog = nestedWritebackLog << 8 | newValue.value
+      value = newValue.value - 1
+    }
+  }
+}
+
+keyPath.test("writebacks nest properly") {
+  var test = NoisyNestingWriteback(value: 0)
+  nestedWritebackLog = 0
+  test.nested.nested.nested.value = 0x38
+  expectEqual(nestedWritebackLog, 0x383736)
+
+  nestedWritebackLog = 0
+  let kp = \NoisyNestingWriteback.nested.nested.nested
+  test[keyPath: kp].value = 0x38
+  expectEqual(nestedWritebackLog, 0x383736)
 }
 
 runAllTests()

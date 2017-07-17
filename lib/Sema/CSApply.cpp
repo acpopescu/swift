@@ -1312,6 +1312,7 @@ namespace {
       
       // Apply a key path if we have one.
       if (choice.getKind() == OverloadChoiceKind::KeyPathApplication) {
+        index = cs.coerceToRValue(index);
         // The index argument should be (keyPath: KeyPath<Root, Value>).
         auto keyPathTTy = cs.getType(index)->castTo<TupleType>()
           ->getElementType(0);
@@ -3711,7 +3712,9 @@ namespace {
     }
 
     Expr *visitKeyPathApplicationExpr(KeyPathApplicationExpr *expr){
-      llvm_unreachable("Already type-checked");
+      // This should already be type-checked, but we may have had to re-
+      // check it for failure diagnosis.
+      return simplifyExprType(expr);
     }
     
     Expr *visitEnumIsCaseExpr(EnumIsCaseExpr *expr) {
@@ -4143,9 +4146,10 @@ namespace {
           auto ref = ConcreteDeclRef(cs.getASTContext(), subscript, subs);
           component = KeyPathExpr::Component
             ::forSubscriptWithPrebuiltIndexExpr(ref,
-                                                origComponent.getIndexExpr(),
-                                                resolvedTy,
-                                                origComponent.getLoc());
+                                            origComponent.getIndexExpr(),
+                                            origComponent.getSubscriptLabels(),
+                                            resolvedTy,
+                                            origComponent.getLoc());
           break;
         }
         case KeyPathExpr::Component::Kind::OptionalChain: {
@@ -4202,7 +4206,8 @@ namespace {
           baseTy &&
           !baseTy->hasUnresolvedType() &&
           !baseTy->isEqual(leafTy)) {
-        assert(leafTy->getAnyOptionalObjectType()->isEqual(baseTy));
+        assert(leafTy->getAnyOptionalObjectType()
+                     ->isEqual(baseTy->getLValueOrInOutObjectType()));
         auto component = KeyPathExpr::Component::forOptionalWrap(leafTy);
         resolvedComponents.push_back(component);
         baseTy = leafTy;
@@ -4877,19 +4882,16 @@ Expr *ExprRewriter::coerceTupleToTuple(Expr *expr, TupleType *fromTuple,
   // Create the tuple shuffle.
   ArrayRef<int> mapping = tc.Context.AllocateCopy(sources);
   auto callerDefaultArgsCopy = tc.Context.AllocateCopy(callerDefaultArgs);
-  auto shuffle =
+  return
     cs.cacheType(new (tc.Context) TupleShuffleExpr(
                      expr, mapping,
                      TupleShuffleExpr::SourceIsTuple,
                      callee,
                      tc.Context.AllocateCopy(variadicArgs),
+                     arrayType,
                      callerDefaultArgsCopy,
                      toSugarType));
-  shuffle->setVarargsArrayType(arrayType);
-  return shuffle;
 }
-
-
 
 Expr *ExprRewriter::coerceScalarToTuple(Expr *expr, TupleType *toTuple,
                                         int toScalarIdx,
@@ -4975,13 +4977,13 @@ Expr *ExprRewriter::coerceScalarToTuple(Expr *expr, TupleType *toTuple,
 
   Type destSugarTy = hasInit? toTuple
                             : TupleType::get(sugarFields, tc.Context);
-
-  return cs.cacheType(
-      new (tc.Context) TupleShuffleExpr(expr,
+                            
+  return cs.cacheType(new (tc.Context) TupleShuffleExpr(expr,
                                         tc.Context.AllocateCopy(elements),
                                         TupleShuffleExpr::SourceIsScalar,
                                         callee,
                                         tc.Context.AllocateCopy(variadicArgs),
+                                        arrayType,
                                      tc.Context.AllocateCopy(callerDefaultArgs),
                                         destSugarTy));
 }
@@ -5609,16 +5611,15 @@ Expr *ExprRewriter::coerceCallArguments(
   // Create the tuple shuffle.
   ArrayRef<int> mapping = tc.Context.AllocateCopy(sources);
   auto callerDefaultArgsCopy = tc.Context.AllocateCopy(callerDefaultArgs);
-  auto *shuffle =
+  return
     cs.cacheType(new (tc.Context) TupleShuffleExpr(
                      arg, mapping,
                      isSourceScalar,
                      callee,
                      tc.Context.AllocateCopy(variadicArgs),
+                     sliceType,
                      callerDefaultArgsCopy,
                      paramType));
-  shuffle->setVarargsArrayType(sliceType);
-  return shuffle;
 }
 
 static ClosureExpr *getClosureLiteralExpr(Expr *expr) {

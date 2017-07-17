@@ -55,8 +55,7 @@ std::string CompilerInvocation::getPCHHash() const {
 void CompilerInstance::createSILModule(bool WholeModule) {
   assert(MainModule && "main module not created yet");
   TheSILModule = SILModule::createEmptyModule(
-      getMainModule(), Invocation.getSILOptions(), WholeModule,
-      Invocation.getFrontendOptions().SILSerializeAll);
+    getMainModule(), Invocation.getSILOptions(), WholeModule);
 }
 
 void CompilerInstance::setPrimarySourceFile(SourceFile *SF) {
@@ -97,6 +96,12 @@ bool CompilerInstance::setup(const CompilerInvocation &Invok) {
   // parsing to remember comments.
   if (!Invocation.getFrontendOptions().ModuleDocOutputPath.empty())
     Invocation.getLangOptions().AttachCommentsToDecls = true;
+
+  // If we are doing index-while-building, configure lexing and parsing to
+  // remember comments.
+  if (!Invocation.getFrontendOptions().IndexStorePath.empty()) {
+    Invocation.getLangOptions().AttachCommentsToDecls = true;
+  }
 
   Context.reset(new ASTContext(Invocation.getLangOptions(),
                                Invocation.getSearchPathOptions(),
@@ -250,7 +255,7 @@ ModuleDecl *CompilerInstance::getMainModule() {
 
     if (Invocation.getFrontendOptions().EnableResilience)
       MainModule->setResilienceStrategy(ResilienceStrategy::Resilient);
-    else if (Invocation.getFrontendOptions().SILSerializeAll)
+    else if (Invocation.getSILOptions().SILSerializeAll)
       MainModule->setResilienceStrategy(ResilienceStrategy::Fragile);
   }
   return MainModule;
@@ -520,7 +525,8 @@ void CompilerInstance::performSema() {
         performTypeChecking(MainFile, PersistentState.getTopLevelContext(),
                             TypeCheckOptions, CurTUElem,
                             options.WarnLongFunctionBodies,
-                            options.WarnLongExpressionTypeChecking);
+                            options.WarnLongExpressionTypeChecking,
+                            options.SolverExpressionTimeThreshold);
       }
       CurTUElem = MainFile.Decls.size();
     } while (!Done);
@@ -549,7 +555,8 @@ void CompilerInstance::performSema() {
         performTypeChecking(*SF, PersistentState.getTopLevelContext(),
                             TypeCheckOptions, /*curElem*/ 0,
                             options.WarnLongFunctionBodies,
-                            options.WarnLongExpressionTypeChecking);
+                            options.WarnLongExpressionTypeChecking,
+                            options.SolverExpressionTimeThreshold);
 
   // Even if there were no source files, we should still record known
   // protocols.

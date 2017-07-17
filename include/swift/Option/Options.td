@@ -295,6 +295,11 @@ def warn_swift3_objc_inference_minimal :
   Flags<[FrontendOption, DoesNotAffectIncrementalBuild]>,
   HelpText<"Warn about deprecated @objc inference in Swift 3 based on direct uses of the Objective-C entrypoint">;
 
+def typo_correction_limit : Separate<["-"], "typo-correction-limit">,
+  Flags<[FrontendOption, HelpHidden]>,
+  MetaVarName<"<n>">,
+  HelpText<"Limit the number of times the compiler will attempt typo correction to <n>">;
+
 def warn_swift3_objc_inference : Flag<["-"], "warn-swift3-objc-inference">,
   Alias<warn_swift3_objc_inference_complete>,
   Flags<[FrontendOption, DoesNotAffectIncrementalBuild, HelpHidden]>;
@@ -645,6 +650,18 @@ def sanitize_coverage_EQ : CommaJoined<["-"], "sanitize-coverage=">,
   MetaVarName<"<type>">,
   HelpText<"Specify the type of coverage instrumentation for Sanitizers and"
   " additional options separated by commas">;
+
+def index_file : Flag<["-"], "index-file">,
+  HelpText<"Produce index data for a source file">, ModeOpt,
+  Flags<[NoInteractiveOption, DoesNotAffectIncrementalBuild]>;
+def index_file_path : Separate<["-"], "index-file-path">,
+  Flags<[NoInteractiveOption, DoesNotAffectIncrementalBuild]>,
+  HelpText<"Produce index data for file <path>">,
+  MetaVarName<"<path>">;
+
+def index_store_path : Separate<["-"], "index-store-path">,
+  Flags<[FrontendOption]>, MetaVarName<"<path>">,
+  HelpText<"Store indexing data to <path>">;
 
 def enforce_exclusivity_EQ : Joined<["-"], "enforce-exclusivity=">,
   Flags<[FrontendOption]>, MetaVarName<"<enforcement>">,

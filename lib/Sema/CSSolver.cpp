@@ -110,7 +110,7 @@ Solution ConstraintSystem::finalize(
   Solution solution(*this, CurrentScore);
 
   // Update the best score we've seen so far.
-  if (solverState) {
+  if (solverState && !retainAllSolutions()) {
     assert(!solverState->BestScore || CurrentScore <= *solverState->BestScore);
     solverState->BestScore = CurrentScore;
   }
@@ -1731,7 +1731,13 @@ void ConstraintSystem::shrink(Expr *expr) {
     }
 
     Expr *walkToExprPost(Expr *expr) override {
-      if (expr == PrimaryExpr) {
+      auto isSrcOfPrimaryAssignment = [&](Expr *expr) -> bool {
+        if (auto *AE = dyn_cast<AssignExpr>(PrimaryExpr))
+          return expr == AE->getSrc();
+        return false;
+      };
+
+      if (expr == PrimaryExpr || isSrcOfPrimaryAssignment(expr)) {
         // If this is primary expression and there are no candidates
         // to be solved, let's not record it, because it's going to be
         // solved regardless.
@@ -1741,14 +1747,14 @@ void ConstraintSystem::shrink(Expr *expr) {
         auto contextualType = CS.getContextualType();
         // If there is a contextual type set for this expression.
         if (!contextualType.isNull()) {
-          Candidates.push_back(Candidate(CS, expr, contextualType,
+          Candidates.push_back(Candidate(CS, PrimaryExpr, contextualType,
                                          CS.getContextualTypePurpose()));
           return expr;
         }
 
         // Or it's a function application with other candidates present.
         if (isa<ApplyExpr>(expr)) {
-          Candidates.push_back(Candidate(CS, expr));
+          Candidates.push_back(Candidate(CS, PrimaryExpr));
           return expr;
         }
       }
@@ -1985,6 +1991,10 @@ ConstraintSystem::solve(Expr *&expr,
 
   assert(!solverState && "use solveRec for recursive calls");
 
+  // Set up the expression type checker timer.
+  Timer.emplace(expr, TC.getDebugTimeExpressions(),
+                TC.getWarnLongExpressionTypeChecking(), TC.Context);
+
   // Try to shrink the system by reducing disjunction domains. This
   // goes through every sub-expression and generate its own sub-system, to
   // try to reduce the domains of those subexpressions.
@@ -2066,16 +2076,11 @@ bool ConstraintSystem::solve(SmallVectorImpl<Solution> &solutions,
   // Solve the system.
   solveRec(solutions, allowFreeTypeVariables);
 
-  // If there is more than one viable system, attempt to pick the best
-  // solution.
-  auto size = solutions.size();
-  if (size > 1) {
-    if (auto best = findBestSolution(solutions, /*minimize=*/false)) {
-      if (*best != 0)
-        solutions[0] = std::move(solutions[*best]);
-      solutions.erase(solutions.begin() + 1, solutions.end());
-    }
-  }
+  // Filter deduced solutions, try to figure out if there is
+  // a single best solution to use, if not explicitly disabled
+  // by constraint system options.
+  if (!retainAllSolutions())
+    filterSolutions(solutions);
 
   // We fail if there is no solution.
   return solutions.empty();
@@ -2288,11 +2293,8 @@ bool ConstraintSystem::solveRec(SmallVectorImpl<Solution> &solutions,
     auto &solutions = partialSolutions[component];
     // If there's a single best solution, keep only that one.
     // Otherwise, the set of solutions will at least have been minimized.
-    if (auto best = findBestSolution(solutions, /*minimize=*/true)) {
-      if (*best > 0)
-        solutions[0] = std::move(solutions[*best]);
-      solutions.erase(solutions.begin() + 1, solutions.end());
-    }
+    if (!retainAllSolutions())
+      filterSolutions(solutions, /*minimize=*/true);
   }
 
   // Produce all combinations of partial solutions.

@@ -25,6 +25,7 @@ enum BarForwardDeclaredEnum {
 - (int) field;
 - (int * _Nullable) field2;
 - (void) setField:(int)info;
+- (void) setURL:(int)url;
 + (int) fieldPlus;
 + (void) methodPlus:(int)info;
 + (void) methodPlus;
@@ -38,6 +39,10 @@ typedef struct {
 } SomeItemSet;
 
 typedef SomeItemSet SomeEnvironment;
+
+@protocol WillOverrideWithTypeChange
+- (SomeItemSet)doThing:(SomeItemSet)thing;
+@end
 
 #define CF_ENUM(_type, _name) enum _name : _type _name; enum _name : _type
 #define NS_ENUM(_type, _name) CF_ENUM(_type, _name)

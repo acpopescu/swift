@@ -128,7 +128,7 @@ createVarWithPattern(ASTContext &cxt, DeclContext *dc, Identifier name, Type ty,
       /*IsStatic*/false,
       /*IsLet*/isLet,
       /*IsCaptureList*/false,
-      SourceLoc(), name, ty, dc);
+      SourceLoc(), name, dc->mapTypeIntoContext(ty), dc);
   if (isImplicit)
     var->setImplicit();
   var->setInterfaceType(ty);
@@ -1865,6 +1865,23 @@ applyPropertyOwnership(VarDecl *prop,
   }
 }
 
+/// Does this name refer to a method that might shadow Swift.print?
+///
+/// As a heuristic, methods that have a base name of 'print' but more than
+/// one argument are left alone. These can still shadow Swift.print but are
+/// less likely to be confused for it, at least.
+static bool isPrintLikeMethod(DeclName name, const DeclContext *dc) {
+  if (!name || name.isSpecial() || name.isSimpleName())
+    return false;
+  if (name.getBaseIdentifier().str() != "print")
+    return false;
+  if (!dc->isTypeContext())
+    return false;
+  if (name.getArgumentNames().size() > 1)
+    return false;
+  return true;
+}
+
 using MirroredMethodEntry =
   std::pair<const clang::ObjCMethodDecl*, ProtocolDecl*>;
 
@@ -3167,7 +3184,7 @@ namespace {
                        /*IsStatic*/false, /*IsLet*/ false,
                        /*IsCaptureList*/false,
                        Impl.importSourceLoc(decl->getLocStart()),
-                       name, type, dc);
+                       name, dc->mapTypeIntoContext(type), dc);
       result->setInterfaceType(type);
 
       // If this is a compatibility stub, mark is as such.
@@ -3388,7 +3405,7 @@ namespace {
                               /*IsStatic*/ false, /*IsLet*/ false,
                               /*IsCaptureList*/false,
                               Impl.importSourceLoc(decl->getLocation()),
-                              name, type, dc);
+                              name, dc->mapTypeIntoContext(type), dc);
       result->setInterfaceType(type);
 
       // Handle attributes.
@@ -3464,7 +3481,7 @@ namespace {
                        /*IsLet*/Impl.shouldImportGlobalAsLet(decl->getType()),
                        /*IsCaptureList*/false,
                        Impl.importSourceLoc(decl->getLocation()),
-                       name, type, dc);
+                       name, dc->mapTypeIntoContext(type), dc);
       result->setInterfaceType(type);
 
       // If imported as member, the member should be final.
@@ -3670,6 +3687,14 @@ namespace {
       // problems for the type checker.
       if (forceClassMethod && decl->hasRelatedResultType())
         return nullptr;
+
+      // Hack: avoid importing methods named "print" that aren't available in
+      // the current version of Swift. We'd rather just let the user use
+      // Swift.print in that case.
+      if (!isActiveSwiftVersion() &&
+          isPrintLikeMethod(importedName.getDeclName(), dc)) {
+        return nullptr;
+      }
 
       // Add the implicit 'self' parameter patterns.
       bool isInstance = decl->isInstanceMethod() && !forceClassMethod;
@@ -4159,12 +4184,12 @@ namespace {
       result->setInherited(Impl.SwiftContext.AllocateCopy(inheritedTypes));
       result->setCheckedInheritanceClause();
 
-      auto *env = Impl.buildGenericEnvironment(result->getGenericParams(), dc);
-      result->setGenericEnvironment(env);
-
       // Compute the requirement signature.
       if (!result->isRequirementSignatureComputed())
         result->computeRequirementSignature();
+
+      auto *env = Impl.buildGenericEnvironment(result->getGenericParams(), dc);
+      result->setGenericEnvironment(env);
 
       result->setMemberLoader(&Impl, 0);
 
@@ -4324,7 +4349,6 @@ namespace {
                                          isInSystemModule(dc),
                                          /*isFullyBridgeable*/false);
         if (superclassType) {
-          superclassType = result->mapTypeOutOfContext(superclassType);
           assert(superclassType->is<ClassType>() ||
                  superclassType->is<BoundGenericClassType>());
           inheritedTypes.push_back(TypeLoc::withoutLoc(superclassType));
@@ -4539,8 +4563,8 @@ namespace {
           getOverridableAccessibility(dc),
           /*IsStatic*/decl->isClassProperty(), /*IsLet*/false,
           /*IsCaptureList*/false, Impl.importSourceLoc(decl->getLocation()),
-          name, type, dc);
-      result->setInterfaceType(dc->mapTypeOutOfContext(type));
+          name, dc->mapTypeIntoContext(type), dc);
+      result->setInterfaceType(type);
 
       // Turn this into a computed property.
       // FIXME: Fake locations for '{' and '}'?
@@ -4930,6 +4954,7 @@ SwiftDeclConverter::importSwiftNewtype(const clang::TypedefNameDecl *decl,
   auto storedUnderlyingType = Impl.importType(
       decl->getUnderlyingType(), ImportTypeKind::Value, isInSystemModule(dc),
       decl->getUnderlyingType()->isBlockPointerType(), OTK_None);
+
   if (auto objTy = storedUnderlyingType->getAnyOptionalObjectType())
     storedUnderlyingType = objTy;
 
@@ -5288,16 +5313,30 @@ Decl *SwiftDeclConverter::importGlobalAsMethod(
   auto &C = Impl.SwiftContext;
   SmallVector<ParameterList *, 2> bodyParams;
 
-  // There is an inout 'self' when we have an instance method of a
-  // value-semantic type whose 'self' parameter is a
-  // pointer-to-non-const.
+  // There is an inout 'self' when the parameter is a pointer to a non-const
+  // instance of the type we're importing onto. Importing this as a method means
+  // that the method should be treated as mutating in this situation.
   bool selfIsInOut = false;
   if (selfIdx && !dc->getDeclaredTypeOfContext()->hasReferenceSemantics()) {
     auto selfParam = decl->getParamDecl(*selfIdx);
     auto selfParamTy = selfParam->getType();
     if ((selfParamTy->isPointerType() || selfParamTy->isReferenceType()) &&
-        !selfParamTy->getPointeeType().isConstQualified())
+        !selfParamTy->getPointeeType().isConstQualified()) {
       selfIsInOut = true;
+
+      // If there's a swift_newtype, check the levels of indirection: self is
+      // only inout if this is a pointer to the typedef type (which itself is a
+      // pointer).
+      if (auto nominalTypeDecl =
+              dc->getAsNominalTypeOrNominalTypeExtensionContext()) {
+        if (auto clangDCTy = dyn_cast_or_null<clang::TypedefNameDecl>(
+                nominalTypeDecl->getClangDecl()))
+          if (auto newtypeAttr = getSwiftNewtypeAttr(clangDCTy, getVersion()))
+            if (clangDCTy->getUnderlyingType().getCanonicalType() !=
+                selfParamTy->getPointeeType().getCanonicalType())
+              selfIsInOut = false;
+      }
+    }
   }
 
   bodyParams.push_back(ParameterList::createWithoutLoc(ParamDecl::createSelf(
@@ -5474,7 +5513,8 @@ SwiftDeclConverter::getImplicitProperty(ImportedName importedName,
 
   auto property = Impl.createDeclWithClangNode<VarDecl>(
       getter, Accessibility::Public, /*IsStatic*/isStatic, /*isLet*/false,
-      /*IsCaptureList*/false, SourceLoc(), propertyName, swiftPropertyType, dc);
+      /*IsCaptureList*/false, SourceLoc(), propertyName,
+      dc->mapTypeIntoContext(swiftPropertyType), dc);
   property->setInterfaceType(swiftPropertyType);
 
   // Note that we've formed this property.
@@ -6333,7 +6373,8 @@ void SwiftDeclConverter::addObjCProtocolConformances(
     auto conformance = ctx.getConformance(dc->getDeclaredTypeInContext(),
                                           protocols[i], SourceLoc(), dc,
                                           ProtocolConformanceState::Incomplete);
-    Impl.scheduleFinishProtocolConformance(conformance);
+    conformance->setLazyLoader(&Impl, /*context*/0);
+    conformance->setState(ProtocolConformanceState::Complete);
     conformances.push_back(conformance);
   }
 
@@ -7001,6 +7042,41 @@ void ClangImporter::Implementation::importAttributes(
                                           PlatformAgnostic, /*Implicit=*/false);
 
       MappedDecl->getAttrs().add(AvAttr);
+
+      // For enum cases introduced in the 2017 SDKs, add
+      // @_downgrade_exhaustivity_check in Swift 3.
+      if (C.LangOpts.isSwiftVersion3() && isa<EnumElementDecl>(MappedDecl)) {
+        bool downgradeExhaustivity = false;
+        switch (*platformK) {
+        case PlatformKind::OSX:
+        case PlatformKind::OSXApplicationExtension:
+          downgradeExhaustivity = (introduced.getMajor() == 10 &&
+                                   introduced.getMinor() &&
+                                   *introduced.getMinor() == 13);
+          break;
+
+        case PlatformKind::iOS:
+        case PlatformKind::iOSApplicationExtension:
+        case PlatformKind::tvOS:
+        case PlatformKind::tvOSApplicationExtension:
+          downgradeExhaustivity = (introduced.getMajor() == 11);
+          break;
+
+        case PlatformKind::watchOS:
+        case PlatformKind::watchOSApplicationExtension:
+          downgradeExhaustivity = (introduced.getMajor() == 4);
+          break;
+
+        case PlatformKind::none:
+          break;
+        }
+
+        if (downgradeExhaustivity) {
+          auto attr =
+            new (C) DowngradeExhaustivityCheckAttr(/*isImplicit=*/true);
+          MappedDecl->getAttrs().add(attr);
+        }
+      }
     }
   }
 
@@ -7052,15 +7128,10 @@ void ClangImporter::Implementation::importAttributes(
   // Hack: mark any method named "print" with less than two parameters as
   // warn_unqualified_access.
   if (auto MD = dyn_cast<FuncDecl>(MappedDecl)) {
-    if (!MD->getName().empty() && MD->getName().str() == "print" &&
-        MD->getDeclContext()->isTypeContext()) {
-      auto *formalParams = MD->getParameterList(1);
-      if (formalParams->size() <= 1) {
-        // Use a non-implicit attribute so it shows up in the generated
-        // interface.
-        MD->getAttrs().add(
-            new (C) WarnUnqualifiedAccessAttr(/*implicit*/false));
-      }
+    if (isPrintLikeMethod(MD->getFullName(), MD->getDeclContext())) {
+      // Use a non-implicit attribute so it shows up in the generated
+      // interface.
+      MD->getAttrs().add(new (C) WarnUnqualifiedAccessAttr(/*implicit*/false));
     }
   }
 
@@ -7236,6 +7307,9 @@ void ClangImporter::Implementation::finishedImportingEntity() {
 
 void ClangImporter::Implementation::finishPendingActions() {
   while (true) {
+    // The odd shape of this loop comes from previously having more than one
+    // possible kind of pending action. It's left this way to make it easy to
+    // add another one back in an `else if` clause.
     if (!RegisteredExternalDecls.empty()) {
       if (hasFinishedTypeChecking()) {
         RegisteredExternalDecls.clear();
@@ -7247,21 +7321,21 @@ void ClangImporter::Implementation::finishPendingActions() {
             if (!nominal->hasDelayedMembers())
               typeResolver->resolveExternalDeclImplicitMembers(nominal);
       }
-    } else if (!DelayedProtocolConformances.empty()) {
-      NormalProtocolConformance *conformance =
-          DelayedProtocolConformances.pop_back_val();
-      finishProtocolConformance(conformance);
     } else {
       break;
     }
   }
 }
 
-/// Finish the given protocol conformance (for an imported type)
-/// by filling in any missing witnesses.
-void ClangImporter::Implementation::finishProtocolConformance(
-    NormalProtocolConformance *conformance) {
+void ClangImporter::Implementation::finishNormalConformance(
+    NormalProtocolConformance *conformance,
+    uint64_t unused) {
+  (void)unused;
   const ProtocolDecl *proto = conformance->getProtocol();
+
+  PrettyStackTraceType trace(SwiftContext, "completing conformance for",
+                             conformance->getType());
+  PrettyStackTraceDecl traceTo("... to", proto);
 
   // Create witnesses for requirements not already met.
   for (auto req : proto->getMembers()) {
@@ -7326,7 +7400,7 @@ void ClangImporter::Implementation::finishProtocolConformance(
 
   // Collect conformances for the requirement signature.
   SmallVector<ProtocolConformanceRef, 4> reqConformances;
-  for (auto req : proto->getRequirementSignature()->getRequirements()) {
+  for (const auto &req : proto->getRequirementSignature()) {
     if (req.getKind() != RequirementKind::Conformance)
       continue;
 
@@ -7692,11 +7766,11 @@ ClangImporter::Implementation::createConstant(Identifier name, DeclContext *dc,
     var = createDeclWithClangNode<VarDecl>(ClangN, Accessibility::Public,
                                            /*IsStatic*/isStatic, /*IsLet*/false,
                                            /*IsCaptureList*/false, SourceLoc(),
-                                           name, type, dc);
+                                           name, dc->mapTypeIntoContext(type), dc);
   } else {
     var = new (SwiftContext)
         VarDecl(/*IsStatic*/isStatic, /*IsLet*/false, /*IsCaptureList*/false,
-                SourceLoc(), name, type, dc);
+                SourceLoc(), name, dc->mapTypeIntoContext(type), dc);
   }
 
   var->setInterfaceType(type);
@@ -7857,8 +7931,9 @@ ClangImporter::Implementation::loadAllMembers(Decl *D, uint64_t extra) {
     for (auto entry : table->lookupGlobalsAsMembers(effectiveClangContext)) {
       auto decl = entry.get<clang::NamedDecl *>();
 
-      // Only continue members in the same submodule as this extension.
-      if (decl->getImportedOwningModule() != submodule) continue;
+      // Only include members in the same submodule as this extension.
+      if (getClangSubmoduleForDecl(decl) != submodule)
+        continue;
 
       forEachDistinctName(decl, [&](ImportedName newName,
                                     ImportNameVersion nameVersion) {
@@ -7870,8 +7945,18 @@ ClangImporter::Implementation::loadAllMembers(Decl *D, uint64_t extra) {
 
         // Then try to import the decl under the specified name.
         auto *member = importDecl(decl, nameVersion);
-        if (!member || member->getDeclContext() != ext)
-          return;
+        if (!member) return;
+
+        // Find the member that will land in an extension context.
+        while (!isa<ExtensionDecl>(member->getDeclContext())) {
+          auto nominal = dyn_cast<NominalTypeDecl>(member->getDeclContext());
+          if (!nominal) return;
+
+          member = nominal;
+          if (member->hasClangNode()) return;
+        }
+
+        if (member->getDeclContext() != ext) return;
         ext->addMember(member);
         
         for (auto alternate : getAlternateDecls(member)) {
@@ -7926,8 +8011,10 @@ ClangImporter::Implementation::loadAllMembers(Decl *D, uint64_t extra) {
   llvm::SmallPtrSet<Decl *, 4> knownAlternateMembers;
   for (const clang::Decl *m : objcContainer->decls()) {
     auto nd = dyn_cast<clang::NamedDecl>(m);
-    if (!nd || nd != nd->getCanonicalDecl())
+    if (!nd || nd != nd->getCanonicalDecl() ||
+        nd->getDeclContext() != objcContainer) {
       continue;
+    }
 
     forEachDistinctName(nd,
                         [&](ImportedName name, ImportNameVersion nameVersion) {
